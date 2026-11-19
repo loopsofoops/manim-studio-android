@@ -187,6 +187,7 @@ enum class ComputeProfile(val label: String, val shortLabel: String, val threads
 
 enum class StudioMode(val label: String) {
     CODE("Code"),
+    AUDIO("Audio"),
     CONTROL("Control")
 }
 

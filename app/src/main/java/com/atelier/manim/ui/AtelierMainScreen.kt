@@ -91,6 +91,11 @@ fun AtelierMainScreen(
     val lastTxId by viewModel.lastTransactionId.collectAsState()
     val installedVoiceIds by viewModel.installedVoiceIds.collectAsState()
     val voiceDownloadState by viewModel.voiceDownloadState.collectAsState()
+    val audioScriptText by viewModel.audioScriptText.collectAsState()
+    val voiceStudioSummary by viewModel.voiceStudioSummary.collectAsState()
+    val latestManifestPath by viewModel.latestManifestPath.collectAsState()
+    val musicFiles by viewModel.musicFiles.collectAsState()
+    val sfxFiles by viewModel.sfxFiles.collectAsState()
     val isDark by viewModel.isDarkTheme.collectAsState()
     val fontSizeSp by viewModel.fontSizeSp.collectAsState()
     val replEntries by viewModel.replEntries.collectAsState()
@@ -283,6 +288,29 @@ fun AtelierMainScreen(
                     onOpenRuntimeSetup = { showRuntimeSheet = true },
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 )
+            } else if (studioMode == StudioMode.AUDIO) {
+                val activeVidTitle = if (execution.activeArtifact.kind == OutputKind.VIDEO) execution.activeArtifact.title else ""
+                AudioStudioWorkspace(
+                    execution = execution,
+                    voiceCatalog = viewModel.voiceCatalog,
+                    installedVoiceIds = installedVoiceIds,
+                    scriptText = audioScriptText,
+                    normalizedPreview = remember(audioScriptText) { viewModel.normalizeMathPreviewLine() },
+                    voiceStatusSummary = voiceStudioSummary,
+                    generatedMusicFiles = musicFiles,
+                    generatedSfxFiles = sfxFiles,
+                    latestManifestPath = latestManifestPath,
+                    activeVideoTitle = activeVidTitle,
+                    onScriptChange = { viewModel.onAudioScriptChange(it) },
+                    onSynthesizeScript = { m, sid, sp -> viewModel.synthesizeAudioStudioScript(m, sid, sp) },
+                    onTestSingleLine = { m, sid, sp -> viewModel.previewAudioScriptLine1(m, sid, sp) },
+                    onComposeMusic = { st, k, sc, bpm, dur, arc -> viewModel.composeBackgroundMusic(st, k, sc, bpm, dur, arc) },
+                    onGenerateSfx = { viewModel.generateMathSfx(it) },
+                    onPlayAudioFile = { viewModel.playHostAudioFile(it) },
+                    onMuxWithActiveVideo = { bgm, shorts -> viewModel.muxActiveVideoWithAudio(bgm, shorts) },
+                    onOpenSettingsForVoices = { showSettingsSheet = true },
+                    modifier = Modifier.weight(1f).fillMaxWidth()
+                )
             } else {
             // 3. Context Action Strip (Scenes + Preset + Fast-Pass Draft/Still/Range + Snapshot)
             if (!stageExpanded) {
@@ -380,7 +408,11 @@ fun AtelierMainScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (mode == StudioMode.CODE) "Code Studio" else "AI Control",
+                            text = when (mode) {
+                                StudioMode.CODE -> "Code"
+                                StudioMode.AUDIO -> "Audio"
+                                StudioMode.CONTROL -> "AI Control"
+                            },
                             color = if (selected) colors.textPrimary else colors.textSecondary,
                             fontSize = 11.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal

@@ -716,6 +716,88 @@ class ExecutionCoordinator(
         }
     }
 
+    fun runAudioOrTimelineJob(
+        modeLabel: String,
+        initialStage: String,
+        pythonCode: String,
+        autoSaveVideo: Boolean = true,
+        onFinished: (exitCode: Int, artifactHostPath: String) -> Unit = { _, _ -> }
+    ) {
+        launchTask(modeLabel = modeLabel, initialStage = initialStage) { startMs ->
+            val scriptHost = File(runtimeManager.outputsDir, ".atelier_media_job.py")
+            scriptHost.writeText(pythonCode, Charsets.UTF_8)
+            crashReporter.lastCommand = "python3 /outputs/.atelier_media_job.py"
+            RenderForegroundService.update(context, modeLabel, initialStage, -1f)
+            appendLog("$ $modeLabel")
+
+            var producedVideoHost: File? = null
+            var producedAudioHost: File? = null
+            val (exitCode, fullLog) = runStreamingProcess(
+                listOf("/opt/atelier-venv/bin/python3", "-u", "/outputs/.atelier_media_job.py")
+            ) { line ->
+                if (line.startsWith("__ATELIER_ARTIFACT__:VIDEO:")) {
+                    val f = prootEngine.guestToHostPath(line.removePrefix("__ATELIER_ARTIFACT__:VIDEO:").trim())
+                    if (f.exists() && f.length() > 0L) producedVideoHost = f
+                } else if (line.startsWith("__ATELIER_ARTIFACT__:AUDIO:")) {
+                    val f = prootEngine.guestToHostPath(line.removePrefix("__ATELIER_ARTIFACT__:AUDIO:").trim())
+                    if (f.exists() && f.length() > 0L) producedAudioHost = f
+                }
+            }
+
+            val elapsed = System.currentTimeMillis() - startMs
+            val diagnostics = DiagnosticParser.parse(fullLog, ".atelier_media_job.py")
+            if (exitCode != 0) {
+                val failEntry = crashReporter.recordExecutionFailure(modeLabel, "audio_timeline", modeLabel, exitCode, elapsed, diagnostics, fullLog)
+                val msg = diagnostics.firstOrNull()?.message ?: "$modeLabel failed (${decodeExitSignal(exitCode)})"
+                _state.update {
+                    it.copy(
+                        isRunning = false, stageLabel = "Failed ($exitCode)", progress = -1f,
+                        diagnostics = diagnostics, lastExitCode = exitCode, elapsedMs = elapsed,
+                        bannerMessage = msg, bannerIsError = true, lastErrorSummary = msg, lastCrashReportPath = failEntry.filePath
+                    )
+                }
+                onFinished(exitCode, "")
+                return@launchTask
+            }
+
+            var finalArtifactPath = producedAudioHost?.absolutePath ?: ""
+            producedVideoHost?.let { vf ->
+                val tel = probeVideo(vf)
+                val snap = blobStore.snapshotArtifact(vf, vf.nameWithoutExtension)
+                val exp = if (autoSaveVideo) mediaExport.saveVideoToStorage(vf, vf.nameWithoutExtension) else null
+                setPreviewArtifact(OutputArtifact(snap, OutputKind.VIDEO, vf.name, tel, exp?.displayLocation ?: "", 0L, System.currentTimeMillis()))
+                finalArtifactPath = snap
+                _state.update {
+                    it.copy(
+                        isRunning = false, stageLabel = "Export ready", progress = 1f, lastExitCode = 0, elapsedMs = elapsed,
+                        bannerMessage = if (exp?.success == true) "Saved to ${exp.displayLocation}" else "Mastered video ready (${elapsed}ms)",
+                        bannerIsError = false
+                    )
+                }
+                onFinished(0, finalArtifactPath)
+                return@launchTask
+            }
+
+            _state.update {
+                it.copy(
+                    isRunning = false, stageLabel = "Complete (${elapsed}ms)", progress = 1f, lastExitCode = 0, elapsedMs = elapsed,
+                    bannerMessage = "$modeLabel complete (${elapsed}ms)", bannerIsError = false
+                )
+            }
+            onFinished(0, finalArtifactPath)
+        }
+    }
+
+    fun publishVideoToStageFromBridge(guestPath: String, title: String, autoSave: Boolean): JSONObject {
+        val hostFile = prootEngine.guestToHostPath(guestPath)
+        if (!hostFile.exists() || hostFile.length() == 0L) error("Video file not found: $guestPath")
+        val tel = probeVideo(hostFile)
+        val snap = blobStore.snapshotArtifact(hostFile, title.ifBlank { hostFile.nameWithoutExtension })
+        val exp = if (autoSave) mediaExport.saveVideoToStorage(hostFile, title.ifBlank { hostFile.nameWithoutExtension }) else null
+        setPreviewArtifact(OutputArtifact(snap, OutputKind.VIDEO, title.ifBlank { hostFile.name }, tel, exp?.displayLocation ?: "", 0L, System.currentTimeMillis()))
+        return JSONObject().put("published", true).put("path", snap).put("exportedLocation", exp?.displayLocation ?: "").put("telemetry", tel.summaryBadge())
+    }
+
     fun runShellCommand(command: String) {
         val clean = command.trim()
         if (clean.isEmpty()) return

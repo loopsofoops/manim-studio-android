@@ -1,8 +1,9 @@
-"""Atelier Studio Director SDK (Phase 2A).
+"""Atelier Studio Director SDK (Phase 2B + 3A).
 
-Programmatic control over Atelier files, settings, Manim/LaTeX/Python rendering,
-native offline neural TTS (atelier.voice), introspection, clipboard, macros,
-and atomic rollback via the authenticated localhost bridge.
+Full programmatic control over files, settings, Manim/LaTeX/Python, offline neural TTS
+(atelier.voice), procedural math music & SFX (atelier.music, atelier.sfx), broadcast
+audio mastering & muxing (atelier.audio), non-destructive multi-track timeline & exports
+(atelier.timeline, atelier.export), introspection, clipboard, macros, and atomic rollback.
 """
 
 from __future__ import annotations
@@ -13,6 +14,9 @@ import sys
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+from . import music_engine as _music_dsp
+from . import timeline_engine as _tl_eng
 
 
 class AtelierError(RuntimeError):
@@ -35,7 +39,7 @@ def rpc(method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 1
     body = json.dumps({"method": method, "params": params or {}}, ensure_ascii=False).encode("utf-8")
     detail = ""
     if params:
-        for k in ("path", "scene", "preset", "mode", "name", "model", "text", "packages", "label", "format"):
+        for k in ("path", "scene", "preset", "mode", "name", "model", "style", "text", "packages", "label", "format"):
             if k in params and params[k] not in (None, ""):
                 detail = f"{k}={str(params[k])[:60]}"
                 break
@@ -64,12 +68,9 @@ def rpc(method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 1
     result = data.get("result")
     ok_detail = detail
     if isinstance(result, dict):
-        if result.get("summary"):
-            ok_detail = str(result["summary"])
-        elif result.get("outputPath"):
-            ok_detail = os.path.basename(str(result["outputPath"]))
-        elif result.get("path"):
-            ok_detail = str(result["path"])
+        if result.get("summary"): ok_detail = str(result["summary"])
+        elif result.get("outputPath"): ok_detail = os.path.basename(str(result["outputPath"]))
+        elif result.get("path"): ok_detail = str(result["path"])
     _emit_step("ok", method, ok_detail)
     return result
 
@@ -122,62 +123,143 @@ class _Manim:
 
 
 class _Voice:
-    def models(self) -> List[Dict[str, Any]]:
-        return rpc("voice.models")
+    def models(self) -> List[Dict[str, Any]]: return rpc("voice.models")
+    def install(self, model_id: str) -> Dict[str, Any]: return rpc("voice.install", {"model": model_id}, timeout=1800.0)
+    def delete(self, model_id: str) -> Dict[str, Any]: return rpc("voice.delete", {"model": model_id})
+    def normalize_math(self, text: str) -> str: return str(rpc("voice.normalize_math", {"text": text})["normalized"])
+    def glossary_get(self) -> Dict[str, str]: return rpc("voice.glossary_get")
+    def glossary_set(self, entries: Dict[str, str]) -> Dict[str, Any]: return rpc("voice.glossary_set", {"entries": entries})
+    def say(self, text: str, model: str = "", sid: int = -1, speed: float = 1.0, normalize_math: bool = True, out_name: str = "") -> Dict[str, Any]:
+        return rpc("voice.say", {"text": text, "model": model, "sid": int(sid), "speed": float(speed), "normalize_math": bool(normalize_math), "out_name": out_name}, timeout=300.0)
+    def synthesize_script(self, lines: List[str], model: str = "", sid: int = -1, speed: float = 1.0, pause_sec: float = 0.28, normalize_math: bool = True, manifest_name: str = "timing_manifest.json", srt_name: str = "captions.srt") -> Dict[str, Any]:
+        return rpc("voice.synthesize_script", {"lines": list(lines), "model": model, "sid": int(sid), "speed": float(speed), "pause_sec": float(pause_sec), "normalize_math": bool(normalize_math), "manifest_name": manifest_name, "srt_name": srt_name}, timeout=1800.0)
+    def release(self) -> Dict[str, Any]: return rpc("voice.release")
 
-    def install(self, model_id: str) -> Dict[str, Any]:
-        return rpc("voice.install", {"model": model_id}, timeout=1800.0)
 
-    def delete(self, model_id: str) -> Dict[str, Any]:
-        return rpc("voice.delete", {"model": model_id})
+class _Music:
+    def styles(self) -> List[str]: return list(_music_dsp.STYLES)
 
-    def normalize_math(self, text: str) -> str:
-        return str(rpc("voice.normalize_math", {"text": text})["normalized"])
+    def compose(self, duration_sec: float = 45.0, style: str = "felt_piano", bpm: float = 84.0, key: str = "D", scale: str = "minor", seed: int = 42, cues: Optional[List[Dict[str, Any]]] = None, out_path: str = "") -> Dict[str, Any]:
+        _emit_step("running", "music.compose", f"{style} {key} {scale} {int(duration_sec)}s")
+        res = _music_dsp.compose_score(duration_sec=duration_sec, style=style, bpm=bpm, key=key, scale=scale, seed=seed, cues=cues, out_path=out_path)
+        _emit_step("ok", "music.compose", res["summary"])
+        return res
 
-    def glossary_get(self) -> Dict[str, str]:
-        return rpc("voice.glossary_get")
+    def list_tracks(self) -> List[str]:
+        d = "/outputs/audio/music"
+        if not os.path.isdir(d): return []
+        return sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith(".wav"))
 
-    def glossary_set(self, entries: Dict[str, str]) -> Dict[str, Any]:
-        return rpc("voice.glossary_set", {"entries": entries})
 
-    def say(
-        self,
-        text: str,
-        model: str = "",
-        sid: int = -1,
-        speed: float = 1.0,
-        normalize_math: bool = True,
-        out_name: str = "",
-    ) -> Dict[str, Any]:
-        return rpc(
-            "voice.say",
-            {"text": text, "model": model, "sid": int(sid), "speed": float(speed), "normalize_math": bool(normalize_math), "out_name": out_name},
-            timeout=300.0,
-        )
+class _Sfx:
+    def presets(self) -> List[str]: return list(_music_dsp.SFX_PRESETS)
 
-    def synthesize_script(
-        self,
-        lines: List[str],
-        model: str = "",
-        sid: int = -1,
-        speed: float = 1.0,
-        pause_sec: float = 0.28,
-        normalize_math: bool = True,
-        manifest_name: str = "timing_manifest.json",
-        srt_name: str = "captions.srt",
-    ) -> Dict[str, Any]:
-        return rpc(
-            "voice.synthesize_script",
-            {
-                "lines": list(lines), "model": model, "sid": int(sid), "speed": float(speed),
-                "pause_sec": float(pause_sec), "normalize_math": bool(normalize_math),
-                "manifest_name": manifest_name, "srt_name": srt_name,
-            },
-            timeout=1800.0,
-        )
+    def generate(self, preset: str = "soft_pop", duration_sec: float = 0.0, out_path: str = "") -> Dict[str, Any]:
+        _emit_step("running", "sfx.generate", preset)
+        res = _music_dsp.generate_sfx(preset=preset, duration_sec=duration_sec, out_path=out_path)
+        _emit_step("ok", "sfx.generate", res["summary"])
+        return res
 
-    def release(self) -> Dict[str, Any]:
-        return rpc("voice.release")
+    def list_sfx(self) -> List[str]:
+        d = "/outputs/audio/sfx"
+        if not os.path.isdir(d): return []
+        return sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith(".wav"))
+
+
+class _Audio:
+    def master_mix(self, voice_clips: List[Dict[str, Any]], sfx_clips: List[Dict[str, Any]], music_clips: List[Dict[str, Any]], total_duration: float, out_wav: str, target_lufs: float = -14.0, duck_db: float = -13.0) -> str:
+        _emit_step("running", "audio.master_mix", os.path.basename(out_wav))
+        p = _tl_eng.master_audio_mix(voice_clips, sfx_clips, music_clips, total_duration, out_wav, target_lufs=target_lufs, duck_db=duck_db)
+        _emit_step("ok", "audio.master_mix", os.path.basename(p))
+        return p
+
+    def mux_video(self, video_path: str, voice_clips: Optional[List[Dict[str, Any]]] = None, sfx_clips: Optional[List[Dict[str, Any]]] = None, music_clips: Optional[List[Dict[str, Any]]] = None, out_mp4: str = "", keep_video_audio: bool = False, target_lufs: float = -14.0, duck_db: float = -13.0, publish_to_stage: bool = True) -> Dict[str, Any]:
+        _emit_step("running", "audio.mux_video", os.path.basename(video_path))
+        res = _tl_eng.mux_video_with_audio(video_path, voice_clips, sfx_clips, music_clips, out_mp4, keep_video_audio=keep_video_audio, target_lufs=target_lufs, duck_db=duck_db)
+        if publish_to_stage and os.environ.get("ATELIER_BRIDGE_PORT"):
+            try:
+                rpc("stage.publish_video", {"guest_path": res["outputPath"], "title": os.path.basename(res["outputPath"])})
+            except Exception:
+                pass
+        _emit_step("ok", "audio.mux_video", res["summary"])
+        return res
+
+
+class _Timeline:
+    def create(self, name: str = "episode_01", preset: str = "youtube_1080p60") -> Dict[str, Any]:
+        _emit_step("running", "timeline.create", f"{name} ({preset})")
+        res = _tl_eng.create_timeline(name, preset)
+        _emit_step("ok", "timeline.create", res["summary"])
+        return res
+
+    def load(self, name_or_path: str) -> Dict[str, Any]:
+        return _tl_eng.load_timeline(name_or_path)
+
+    def save(self, name_or_path: str, doc: Dict[str, Any]) -> str:
+        return _tl_eng.save_timeline(name_or_path, doc)
+
+    def add_video(self, name_or_path: str, video_path: str, trim_start: float = 0.0, trim_end: float = 0.0, speed: float = 1.0, freeze_tail_sec: float = 0.0, label: str = "") -> Dict[str, Any]:
+        doc = _tl_eng.load_timeline(name_or_path)
+        doc["video_clips"].append({"path": video_path, "trim_start": float(trim_start), "trim_end": float(trim_end), "speed": float(speed), "freeze_tail_sec": float(freeze_tail_sec), "label": label or os.path.basename(video_path)})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+    def add_voice(self, name_or_path: str, wav_path: str, start: float = 0.0, gain_db: float = 0.0, text: str = "", trim_silence: bool = False) -> Dict[str, Any]:
+        doc = _tl_eng.load_timeline(name_or_path)
+        doc["voice_clips"].append({"path": wav_path, "start": float(start), "gain_db": float(gain_db), "text": text, "trim_silence": bool(trim_silence)})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+    def import_voice_manifest(self, name_or_path: str, manifest_path: str, offset_sec: float = 0.0) -> Dict[str, Any]:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            man = json.load(f)
+        doc = _tl_eng.load_timeline(name_or_path)
+        for cue in man.get("cues", []):
+            st = float(cue["startSec"]) + float(offset_sec)
+            en = float(cue["endSec"]) + float(offset_sec)
+            doc["voice_clips"].append({"path": cue["wavPath"], "start": st, "gain_db": 0.0, "text": cue["text"]})
+            doc["captions"].append({"start": st, "end": en, "text": cue["text"]})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+    def add_sfx(self, name_or_path: str, wav_path: str, start: float, gain_db: float = -5.0) -> Dict[str, Any]:
+        doc = _tl_eng.load_timeline(name_or_path)
+        doc["sfx_clips"].append({"path": wav_path, "start": float(start), "gain_db": float(gain_db)})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+    def add_music(self, name_or_path: str, wav_path: str, start: float = 0.0, duration: float = 0.0, gain_db: float = -11.0, fade_in: float = 1.2, fade_out: float = 2.2) -> Dict[str, Any]:
+        doc = _tl_eng.load_timeline(name_or_path)
+        doc["music_clips"].append({"path": wav_path, "start": float(start), "duration": float(duration), "gain_db": float(gain_db), "fade_in": float(fade_in), "fade_out": float(fade_out)})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+    def add_caption(self, name_or_path: str, start: float, end: float, text: str) -> Dict[str, Any]:
+        doc = _tl_eng.load_timeline(name_or_path)
+        doc["captions"].append({"start": float(start), "end": float(end), "text": str(text)})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+    def add_chapter(self, name_or_path: str, time_sec: float, title: str) -> Dict[str, Any]:
+        doc = _tl_eng.load_timeline(name_or_path)
+        doc["chapters"].append({"time": float(time_sec), "title": str(title)})
+        _tl_eng.save_timeline(name_or_path, doc)
+        return doc
+
+
+class _Export:
+    def presets(self) -> List[str]: return list(_tl_eng.EXPORT_PRESETS.keys())
+
+    def render_timeline(self, name_or_path: str, preset: str = "", out_mp4: str = "", target_lufs: float = -14.0, duck_db: float = -13.0, shorts_reframe: str = "blur_pillarbox", publish_to_stage: bool = True) -> Dict[str, Any]:
+        _emit_step("running", "export.render_timeline", f"{name_or_path} ({preset or 'default'})")
+        res = _tl_eng.render_timeline(name_or_path, preset=preset, out_mp4=out_mp4, target_lufs=target_lufs, duck_db=duck_db, shorts_reframe=shorts_reframe)
+        if publish_to_stage and os.environ.get("ATELIER_BRIDGE_PORT"):
+            try:
+                rpc("stage.publish_video", {"guest_path": res["outputPath"], "title": os.path.basename(res["outputPath"])})
+            except Exception:
+                pass
+        _emit_step("ok", "export.render_timeline", res["summary"])
+        return res
 
 
 class _Latex:
@@ -221,10 +303,18 @@ files = _Files()
 settings = _Settings()
 manim = _Manim()
 voice = _Voice()
+music = _Music()
+sfx = _Sfx()
+audio = _Audio()
+timeline = _Timeline()
+export = _Export()
 latex = _Latex()
 python = _Python()
 pip = _Pip()
 app = _App()
 tx = _Tx()
 
-__all__ = ["AtelierError", "rpc", "inspect", "files", "settings", "manim", "voice", "latex", "python", "pip", "app", "tx"]
+__all__ = [
+    "AtelierError", "rpc", "inspect", "files", "settings", "manim",
+    "voice", "music", "sfx", "audio", "timeline", "export", "latex", "python", "pip", "app", "tx",
+]

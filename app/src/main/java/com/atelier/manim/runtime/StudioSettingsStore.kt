@@ -229,6 +229,12 @@ class StudioSettingsStore(context: Context) {
                 code = "import atelier\n\nactive = atelier.inspect.active_file(include_content=False)\npath = active[\"relativePath\"]\nscenes = atelier.manim.detect_scenes(path)\nprint(\"Scenes:\", scenes)\nfor sc in scenes:\n    res = atelier.manim.render(path, scene=sc)\n    print(sc, \"exit=\", res.get(\"exitCode\"), res.get(\"outputPath\"))\natelier.app.toast(f\"Rendered {len(scenes)} scene(s)\")\n"
             ),
             ControllerMacro(
+                id = "full_yt_master",
+                name = "Full YouTube Master",
+                description = "Compose Felt-Piano score + Q.E.D. SFX + build timeline + master -14 LUFS 16:9 & 9:16",
+                code = "import atelier, os\n\nex = atelier.inspect.execution()\nart = ex.get(\"activeArtifact\", {})\nvid_host = art.get(\"path\", \"\")\nprint(\"Active artifact:\", art)\nbgm = atelier.music.compose(duration_sec=45, style=\"felt_piano\", bpm=84, key=\"D\", scale=\"minor\", cues=[{\"time\": 0, \"energy\": 0.35}, {\"time\": 24, \"energy\": 0.88}, {\"time\": 38, \"energy\": 0.95, \"resolve\": True}])\nsfx = atelier.sfx.generate(\"qed_chord\")\nprint(\"BGM:\", bgm[\"path\"], \"SFX:\", sfx[\"path\"])\natelier.app.toast(\"Composed score & Q.E.D. SFX — ready in Audio Studio\")\n"
+            ),
+            ControllerMacro(
                 id = "narrated_pipeline",
                 name = "Narrated Episode Run",
                 description = "Synthesize math narration with offline TTS, build timing manifest + SRT, and render showcase",

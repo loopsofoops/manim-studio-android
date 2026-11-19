@@ -327,6 +327,11 @@ class AtelierBridgeServer(
             )
         }
         "voice.release" -> { voiceEngine.release(); JSONObject().put("released", true) }
+        "stage.publish_video" -> coordinator.publishVideoToStageFromBridge(
+            guestPath = p.getString("guest_path"),
+            title = p.optString("title", ""),
+            autoSave = settingsStore.autoSaveStorage.value
+        )
 
         "app.switch_mode" -> {
             val mode = StudioMode.entries.firstOrNull { it.name.equals(p.optString("mode"), true) } ?: error("Expected CODE or CONTROL")

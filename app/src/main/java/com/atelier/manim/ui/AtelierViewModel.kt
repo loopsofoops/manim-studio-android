@@ -111,6 +111,25 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     )
     val controllerValue: StateFlow<TextFieldValue> = _controllerValue.asStateFlow()
 
+    private val _audioScriptText = MutableStateFlow(
+        "On the complex plane, multiplying by e^{i\\theta} rotates smoothly along the unit circle.\n" +
+            "Watch the real cosine shadow and imaginary sine height sweep cleanly to \\pi radians.\n" +
+            "At angle \\pi, we land on negative one, revealing Euler's identity: e^{i\\pi} + 1 = 0."
+    )
+    val audioScriptText: StateFlow<String> = _audioScriptText.asStateFlow()
+
+    private val _voiceStudioSummary = MutableStateFlow("")
+    val voiceStudioSummary: StateFlow<String> = _voiceStudioSummary.asStateFlow()
+
+    private val _latestManifestPath = MutableStateFlow("")
+    val latestManifestPath: StateFlow<String> = _latestManifestPath.asStateFlow()
+
+    private val _musicFiles = MutableStateFlow<List<File>>(emptyList())
+    val musicFiles: StateFlow<List<File>> = _musicFiles.asStateFlow()
+
+    private val _sfxFiles = MutableStateFlow<List<File>>(emptyList())
+    val sfxFiles: StateFlow<List<File>> = _sfxFiles.asStateFlow()
+
     private val _replEntries = MutableStateFlow<List<ReplEntry>>(emptyList())
     val replEntries: StateFlow<List<ReplEntry>> = _replEntries.asStateFlow()
     private val _replVars = MutableStateFlow<List<ReplVar>>(emptyList())
@@ -133,6 +152,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         app.runtimeManager.refreshState()
+        refreshAudioAssets()
         viewModelScope.launch {
             app.workspaceRepo.syncWorkspaceFromDisk()
             val all = app.workspaceRepo.ensureSeeded()
@@ -282,6 +302,117 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         app.voiceEngine.deleteModel(modelId)
         showToast("Removed voice model")
     }
+    fun onAudioScriptChange(text: String) { _audioScriptText.value = text }
+
+    fun normalizeMathPreviewLine(): String {
+        val first = _audioScriptText.value.lines().firstOrNull { it.isNotBlank() }.orEmpty()
+        return if (first.isBlank()) "" else app.voiceEngine.normalizer.normalize(first)
+    }
+
+    fun refreshAudioAssets() {
+        val audioRoot = File(app.runtimeManager.outputsDir, "audio")
+        _musicFiles.value = File(audioRoot, "music").listFiles()?.filter { it.isFile && it.name.endsWith(".wav") }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        _sfxFiles.value = File(audioRoot, "sfx").listFiles()?.filter { it.isFile && it.name.endsWith(".wav") }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        val man = File(audioRoot, "timing_manifest.json")
+        if (man.exists()) _latestManifestPath.value = "/outputs/audio/timing_manifest.json"
+    }
+
+    fun playHostAudioFile(hostPath: String) {
+        app.voiceEngine.playPreviewWav(hostPath)
+    }
+
+    fun synthesizeAudioStudioScript(modelId: String, sid: Int, speed: Float) {
+        val lines = _audioScriptText.value.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) { showToast("Enter at least one narration line"); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                _voiceStudioSummary.value = "Synthesizing ${lines.size} cue(s)..."
+                val res = app.voiceEngine.synthesizeScript(lines = lines, modelId = modelId, sid = sid, speed = speed, normalizeMath = true)
+                _latestManifestPath.value = res.optString("manifestPath", "")
+                val total = res.optDouble("totalDurationSec", 0.0)
+                _voiceStudioSummary.value = "Ready: ${res.optInt("cueCount")} cues · ${String.format("%.1fs", total)} · SRT saved"
+                val firstCueWav = res.optJSONArray("cues")?.optJSONObject(0)?.optString("wavPath", "").orEmpty()
+                if (firstCueWav.isNotBlank()) app.voiceEngine.playPreviewWav(app.prootEngine.guestToHostPath(firstCueWav).absolutePath)
+                showToast("Voice script & captions.srt ready (${String.format("%.1fs", total)})")
+            }.onFailure {
+                _voiceStudioSummary.value = "Error: ${it.message}"
+                showToast(it.message ?: "Synthesis failed")
+            }
+        }
+    }
+
+    fun previewAudioScriptLine1(modelId: String, sid: Int, speed: Float) {
+        val line = _audioScriptText.value.lines().firstOrNull { it.isNotBlank() }.orEmpty()
+        if (line.isBlank()) { showToast("Script is empty"); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val res = app.voiceEngine.synthesize(text = line, modelId = modelId, sid = sid, speed = speed, normalizeMath = true)
+                app.voiceEngine.playPreviewWav(res.wavHostPath)
+                showToast("Playing line 1 (${String.format("%.1fs", res.durationSec)})")
+            }.onFailure { showToast(it.message ?: "Voice preview failed") }
+        }
+    }
+
+    fun composeBackgroundMusic(style: String, key: String, scale: String, bpm: Int, durationSec: Int, arc: String) {
+        val cuesPy = when (arc) {
+            "calm_study" -> "[{\"time\": 0, \"energy\": 0.35}, {\"time\": ${durationSec}, \"energy\": 0.40}]"
+            "dynamic_build" -> "[{\"time\": 0, \"energy\": 0.30}, {\"time\": ${durationSec * 0.6}, \"energy\": 0.75}, {\"time\": ${durationSec * 0.9}, \"energy\": 0.95, \"resolve\": True}]"
+            else -> "[{\"time\": 0, \"energy\": 0.38}, {\"time\": ${durationSec * 0.55}, \"energy\": 0.80}, {\"time\": ${durationSec * 0.82}, \"energy\": 0.96, \"resolve\": True}, {\"time\": ${durationSec}, \"energy\": 0.35}]"
+        }
+        val py = "import atelier\nres = atelier.music.compose(duration_sec=$durationSec, style='$style', bpm=$bpm, key='$key', scale='$scale', cues=$cuesPy)\nprint('__ATELIER_ARTIFACT__:AUDIO:' + res['path'], flush=True)\nprint(res)\n"
+        app.coordinator.runAudioOrTimelineJob("Compose · $style", "Synthesizing $key $scale (${durationSec}s)...", py, autoSaveVideo = false) { code, hostPath ->
+            refreshAudioAssets()
+            if (code == 0 && hostPath.isNotBlank()) app.voiceEngine.playPreviewWav(hostPath)
+        }
+    }
+
+    fun generateMathSfx(preset: String) {
+        val py = "import atelier\nres = atelier.sfx.generate('$preset')\nprint('__ATELIER_ARTIFACT__:AUDIO:' + res['path'], flush=True)\nprint(res)\n"
+        app.coordinator.runAudioOrTimelineJob("SFX · $preset", "Synthesizing $preset...", py, autoSaveVideo = false) { code, hostPath ->
+            refreshAudioAssets()
+            if (code == 0 && hostPath.isNotBlank()) app.voiceEngine.playPreviewWav(hostPath)
+        }
+    }
+
+    fun muxActiveVideoWithAudio(bgmGuestPath: String, exportShorts9x16: Boolean) {
+        val art = executionState.value.activeArtifact
+        if (art.kind != OutputKind.VIDEO || art.path.isBlank() || !File(art.path).exists()) {
+            showToast("Render a Manim video first")
+            return
+        }
+        // Copy active snapshot into /outputs/exports/_src_active.mp4 so PRoot FFmpeg can access it cleanly
+        val srcCopy = File(File(app.runtimeManager.outputsDir, "exports").apply { mkdirs() }, "_src_active.mp4")
+        runCatching { File(art.path).copyTo(srcCopy, overwrite = true) }.onFailure {
+            showToast("Failed staging source video"); return
+        }
+        val manPath = _latestManifestPath.value
+        val presetName = if (exportShorts9x16) "shorts_9x16_60" else "youtube_1080p60"
+        val py = buildString {
+            appendLine("import atelier, os")
+            appendLine("tl = 'audio_studio_mix'")
+            appendLine("atelier.timeline.create(tl, preset='$presetName')")
+            appendLine("atelier.timeline.add_video(tl, '/outputs/exports/_src_active.mp4')")
+            if (manPath.isNotBlank()) {
+                appendLine("if os.path.exists('$manPath'): atelier.timeline.import_voice_manifest(tl, '$manPath')")
+            }
+            if (bgmGuestPath.isNotBlank()) {
+                appendLine("if os.path.exists('$bgmGuestPath'): atelier.timeline.add_music(tl, '$bgmGuestPath', gain_db=-11.0)")
+            }
+            if (exportShorts9x16) {
+                appendLine("res = atelier.export.render_timeline(tl, preset='shorts_9x16_60', publish_to_stage=False)")
+            } else {
+                appendLine("doc = atelier.timeline.load(tl)")
+                appendLine("res = atelier.audio.mux_video('/outputs/exports/_src_active.mp4', voice_clips=doc['voice_clips'], music_clips=doc['music_clips'], keep_video_audio=(len(doc['voice_clips'])==0), publish_to_stage=False)")
+            }
+            appendLine("print('__ATELIER_ARTIFACT__:VIDEO:' + res['outputPath'], flush=True)")
+            appendLine("print(res)")
+        }
+        val label = if (exportShorts9x16) "Master 9:16 Short" else "Master 16:9 Audio Mix"
+        app.coordinator.runAudioOrTimelineJob(label, "Applying EQ, auto-ducking & -14 LUFS...", py, autoSaveVideo = settings.autoSaveStorage.value) { code, _ ->
+            if (code == 0) settings.setStudioMode(StudioMode.CODE)
+        }
+    }
+
     fun testVoiceModel(modelId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
