@@ -1,0 +1,136 @@
+name: Build Atelier Release APK
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Fetch Cached PRoot ARM64 Binaries (proot-v1)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          gh release download proot-v1 -p "proot-arm64-v8a.tar.gz" -D /tmp
+          tar -xzf /tmp/proot-arm64-v8a.tar.gz -C app/src/main/jniLibs/arm64-v8a
+          ls -lh app/src/main/jniLibs/arm64-v8a
+
+      - name: Provision Release Keystore Safely with Python
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          python3 - <<'PYEOF'
+import base64, os, subprocess
+
+raw = os.environ.get("KEYSTORE_BASE64", "").strip().replace("\n", "").replace("\r", "").replace(" ", "")
+env_file = os.environ["GITHUB_ENV"]
+
+if raw:
+    missing_padding = len(raw) % 4
+    if missing_padding:
+        raw += "=" * (4 - missing_padding)
+    with open("app/release-key.jks", "wb") as f:
+        f.write(base64.b64decode(raw))
+    print("Decoded release keystore from KEYSTORE_BASE64 secret.")
+else:
+    print("Generating dedicated PKCS12 signing key for release APK.")
+    subprocess.run([
+        "keytool", "-genkeypair", "-v",
+        "-keystore", "app/release-key.jks",
+        "-storetype", "PKCS12",
+        "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+        "-alias", "atelier",
+        "-storepass", "atelier_release_key",
+        "-keypass", "atelier_release_key",
+        "-dname", "CN=Atelier, O=Atelier Studio, C=US"
+    ], check=True)
+    with open(env_file, "a") as f:
+        f.write("KEYSTORE_PASSWORD=atelier_release_key\n")
+        f.write("KEY_ALIAS=atelier\n")
+        f.write("KEY_PASSWORD=atelier_release_key\n")
+PYEOF
+
+      - name: Build Signed Release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || env.KEY_PASSWORD }}
+        run: |
+          grep -q '^android.useAndroidX=true' gradle.properties || echo "android.useAndroidX=true" >> gradle.properties
+          grep -q '^android.nonTransitiveRClass=true' gradle.properties || echo "android.nonTransitiveRClass=true" >> gradle.properties
+          gradle assembleRelease -Pandroid.useAndroidX=true
+
+      - name: Verify Native ELF Integrity inside Built APK
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends binutils
+          python3 scripts/verify-apk-elf.py --apk app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload APK to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Atelier-arm64-v8a-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 14
+
+      - name: Publish APK to GitHub Releases (app-latest) & Cloud Mirrors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK_SRC="app/build/outputs/apk/release/app-release.apk"
+          FINAL_APK="Atelier-arm64-v8a.apk"
+          cp "$APK_SRC" "$FINAL_APK"
+          sha256sum "$FINAL_APK" > "${FINAL_APK}.sha256"
+
+          if gh release view app-latest >/dev/null 2>&1; then
+            gh release upload app-latest "$FINAL_APK" "${FINAL_APK}.sha256" --clobber
+          else
+            gh release create app-latest "$FINAL_APK" "${FINAL_APK}.sha256" \
+              --title "Atelier Latest APK (ARM64)" \
+              --notes "Lean ARM64 release APK. On first launch, Atelier downloads and SHA-256 verifies runtime-v1 once for full offline Manim, Python, LaTeX, FFmpeg, and GCC execution."
+          fi
+
+          DIRECT_GH="https://github.com/${{ github.repository }}/releases/download/app-latest/${FINAL_APK}"
+          echo "### Atelier Release APK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **GitHub Release (Permanent):** [$DIRECT_GH]($DIRECT_GH)" >> "$GITHUB_STEP_SUMMARY"
+
+          log_upload() {
+            local svc="$1"
+            local url="$2"
+            if [[ -n "$url" && "$url" =~ ^https?:// ]]; then
+              echo "Mirror $svc: $url"
+              echo "- **$svc:** [$url]($url)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          URL_CATBOX=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "fileToUpload=@$FINAL_APK" https://catbox.moe/user/api.php 2>/dev/null || true)
+          log_upload "Catbox.moe" "$URL_CATBOX"
+
+          URL_LITTER=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$FINAL_APK" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null || true)
+          log_upload "Litterbox" "$URL_LITTER"
+
+          URL_TRANSFER=$(curl -s -A "Mozilla/5.0" -H "Content-Type: application/vnd.android.package-archive" --upload-file "$FINAL_APK" "https://transfer.sh/$FINAL_APK" 2>/dev/null || true)
+          log_upload "Transfer.sh" "$URL_TRANSFER"
+
+          URL_TEMP=$(curl -s -A "Mozilla/5.0" -F "file=@$FINAL_APK" https://temp.sh/upload 2>/dev/null || true)
+          log_upload "Temp.sh" "$URL_TEMP"

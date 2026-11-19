@@ -1,0 +1,90 @@
+name: Build ARM64 Python + Manim + TeX + GCC Rootfs
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zstd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd
+
+      - name: Build Native ARM64 Rootfs Image with End-to-End Smoke Tests
+        run: |
+          docker build -f docker/Dockerfile.rootfs -t atelier-rootfs:arm64 .
+
+      - name: Capture Runtime Metadata
+        run: |
+          PY_VER=$(docker run --rm atelier-rootfs:arm64 /opt/atelier-venv/bin/python3 -c "import sys; print(sys.version.split()[0])")
+          MANIM_VER=$(docker run --rm atelier-rootfs:arm64 /opt/atelier-venv/bin/python3 -c "import manim; print(manim.__version__)")
+          GCC_VER=$(docker run --rm atelier-rootfs:arm64 gcc -dumpversion)
+          TEX_VER=$(docker run --rm atelier-rootfs:arm64 pdflatex --version | head -n 1 | tr -d '"')
+          echo "PY_VER=$PY_VER" >> "$GITHUB_ENV"
+          echo "MANIM_VER=$MANIM_VER" >> "$GITHUB_ENV"
+          echo "GCC_VER=$GCC_VER" >> "$GITHUB_ENV"
+          echo "TEX_VER=$TEX_VER" >> "$GITHUB_ENV"
+
+      - name: Export and Compress Rootfs (Hardlink-Dereferenced Zstd)
+        run: |
+          CID=$(docker create atelier-rootfs:arm64 /bin/true)
+          mkdir -p rootfs_stage
+          docker export "$CID" | sudo tar -xf - -C rootfs_stage
+          docker rm "$CID"
+          docker rmi atelier-rootfs:arm64
+
+          sudo rm -f rootfs_stage/.dockerenv
+          sudo rm -rf rootfs_stage/tmp/* rootfs_stage/var/tmp/* rootfs_stage/var/cache/apt/*
+          sudo mkdir -p rootfs_stage/tmp rootfs_stage/dev rootfs_stage/proc rootfs_stage/sys rootfs_stage/workspace rootfs_stage/user-site rootfs_stage/outputs
+          sudo chmod 1777 rootfs_stage/tmp
+          sudo rm -f rootfs_stage/etc/resolv.conf
+          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' | sudo tee rootfs_stage/etc/resolv.conf >/dev/null
+          printf '127.0.0.1 localhost\n::1 localhost\n' | sudo tee rootfs_stage/etc/hosts >/dev/null
+
+          EXTRACTED_BYTES=$(sudo du -sb rootfs_stage | awk '{print $1}')
+          sudo tar --numeric-owner --hard-dereference -C rootfs_stage -cf - . | zstd -19 -T0 -o rootfs-arm64.tar.zst
+          sudo rm -rf rootfs_stage
+
+          SHA256=$(sha256sum rootfs-arm64.tar.zst | awk '{print $1}')
+          COMP_BYTES=$(stat -c%s rootfs-arm64.tar.zst)
+          echo "$SHA256  rootfs-arm64.tar.zst" > rootfs-arm64.tar.zst.sha256
+
+          SHA256="$SHA256" COMP_BYTES="$COMP_BYTES" EXTRACTED_BYTES="$EXTRACTED_BYTES" python3 - <<'PYEOF'
+import json, os
+repo = os.environ["GITHUB_REPOSITORY"]
+manifest = {
+    "version": "1.0.0",
+    "arch": "arm64-v8a",
+    "sha256": os.environ["SHA256"],
+    "compressedBytes": int(os.environ["COMP_BYTES"]),
+    "estimatedExtractedBytes": int(os.environ["EXTRACTED_BYTES"]),
+    "downloadUrl": f"https://github.com/{repo}/releases/download/runtime-v1/rootfs-arm64.tar.zst",
+    "pythonVersion": os.environ["PY_VER"],
+    "manimVersion": os.environ["MANIM_VER"],
+    "gccVersion": os.environ["GCC_VER"],
+    "texVersion": os.environ["TEX_VER"],
+}
+with open("rootfs-manifest.json", "w") as f:
+    json.dump(manifest, f, indent=2)
+print(json.dumps(manifest, indent=2))
+PYEOF
+
+      - name: Publish Runtime Release Assets (runtime-v1)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view runtime-v1 >/dev/null 2>&1; then
+            gh release upload runtime-v1 rootfs-arm64.tar.zst rootfs-manifest.json rootfs-arm64.tar.zst.sha256 --clobber
+          else
+            gh release create runtime-v1 rootfs-arm64.tar.zst rootfs-manifest.json rootfs-arm64.tar.zst.sha256 \
+              --title "Atelier ARM64 Runtime v1 (Python ${{ env.PY_VER }} · Manim ${{ env.MANIM_VER }} · TeX · GCC)" \
+              --notes "Verified offline ARM64 Linux runtime for Atelier."
+          fi

@@ -1,0 +1,25 @@
+name: Full Atelier Build & Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  proot:
+    uses: ./.github/workflows/build-proot.yml
+    permissions:
+      contents: write
+
+  rootfs:
+    uses: ./.github/workflows/build-rootfs.yml
+    permissions:
+      contents: write
+
+  apk:
+    needs: [proot, rootfs]
+    uses: ./.github/workflows/build-apk.yml
+    permissions:
+      contents: write
+    secrets: inherit

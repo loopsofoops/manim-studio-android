@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="workspace" path="workspace/" />
+    <files-path name="outputs" path="outputs/" />
+    <files-path name="history_artifacts" path="history_artifacts/" />
+    <cache-path name="cache" path="." />
+</paths>

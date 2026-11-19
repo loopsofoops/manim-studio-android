@@ -1,0 +1,43 @@
+name: Build PRoot ARM64 Binaries
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  build-proot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends patchelf binutils dpkg curl gzip python3
+
+      - name: Fetch and Patch Termux ARM64 PRoot Bundle
+        run: |
+          chmod +x scripts/build-proot.sh scripts/verify-apk-elf.py
+          ./scripts/build-proot.sh dist/arm64-v8a
+          python3 scripts/verify-apk-elf.py --dir dist/arm64-v8a
+
+      - name: Package PRoot Archive
+        run: |
+          tar -C dist/arm64-v8a -czf proot-arm64-v8a.tar.gz libproot.so libproot-loader.so libtalloc.so libandroid-shmem.so
+          sha256sum proot-arm64-v8a.tar.gz > proot-arm64-v8a.tar.gz.sha256
+          cat proot-arm64-v8a.tar.gz.sha256
+
+      - name: Publish PRoot Release Asset (proot-v1)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view proot-v1 >/dev/null 2>&1; then
+            gh release upload proot-v1 proot-arm64-v8a.tar.gz proot-arm64-v8a.tar.gz.sha256 --clobber
+          else
+            gh release create proot-v1 proot-arm64-v8a.tar.gz proot-arm64-v8a.tar.gz.sha256 \
+              --title "PRoot ARM64 Native Runtime (v1)" \
+              --notes "Verified ARM64 PRoot, loader, talloc, and android-shmem binaries for Atelier."
+          fi
