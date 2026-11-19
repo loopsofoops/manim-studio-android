@@ -22,6 +22,7 @@ import com.atelier.manim.runtime.ReplVar
 import com.atelier.manim.runtime.RuntimeState
 import com.atelier.manim.runtime.VideoTelemetry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +35,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class AtelierViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as AtelierApp
     private val prefs = application.getSharedPreferences("atelier_ui", Context.MODE_PRIVATE)
@@ -120,9 +122,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         app.runtimeManager.refreshState()
         viewModelScope.launch {
             val all = app.workspaceRepo.ensureSeeded()
-            if (all.isNotEmpty()) {
-                openFile(all.first())
-            }
+            if (all.isNotEmpty()) openFile(all.first())
         }
     }
 
@@ -228,9 +228,8 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun readRevisionContent(revision: FileRevisionEntity): String {
-        return app.blobStore.readBlob(revision.contentHash) ?: ""
-    }
+    fun readRevisionContent(revision: FileRevisionEntity): String =
+        app.blobStore.readBlob(revision.contentHash) ?: ""
 
     fun restoreRevision(revision: FileRevisionEntity) {
         val file = _activeFile.value ?: return
@@ -282,9 +281,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
                     autoSaveToStorage = _autoSaveStorage.value
                 )
             }
-            else -> {
-                app.coordinator.runPython(file, code)
-            }
+            else -> app.coordinator.runPython(file, code)
         }
     }
 
