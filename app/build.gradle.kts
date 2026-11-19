@@ -100,5 +100,5 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.5.1")
 
     implementation("org.apache.commons:commons-compress:1.27.1")
-    implementation("com.github.luben:zstd-jni:1.5.7-15@aar")
+    implementation("com.github.luben:zstd-jni:1.5.7-4@aar")
 }
