@@ -8,6 +8,8 @@ import java.io.File
 import java.io.FileOutputStream
 
 object StarterTemplates {
+    private const val D = "$"
+
     val fourierManim: String = """
 from manim import *
 import numpy as np
@@ -121,14 +123,14 @@ class HarmonicSurface3D(ThreeDScene):
 \maketitle
 
 \begin{theorem}[Gaussian Integral]
-For every real parameter $\alpha > 0$,
+For every real parameter ${D}\alpha > 0${D},
 \[
     \int_{-\infty}^{\infty} e^{-\alpha x^2}\,dx = \sqrt{\frac{\pi}{\alpha}}.
 \]
 \end{theorem}
 
 \begin{proof}
-Let $I(\alpha) = \int_{-\infty}^{\infty} e^{-\alpha x^2}\,dx$. Squaring and passing to polar coordinates $(r,\theta)$ yields
+Let ${D}I(\alpha) = \int_{-\infty}^{\infty} e^{-\alpha x^2}\,dx${D}. Squaring and passing to polar coordinates ${D}(r,\theta)${D} yields
 \[
     I(\alpha)^2 = \int_{0}^{2\pi}\!\!\int_{0}^{\infty} e^{-\alpha r^2}\,r\,dr\,d\theta
     = 2\pi \left[-\frac{e^{-\alpha r^2}}{2\alpha}\right]_{0}^{\infty}
@@ -164,9 +166,9 @@ env = np.exp(-t**2 / 2.0)
 
 fig, ax = plt.subplots(figsize=(6.4, 3.8), facecolor="#0B0B0E")
 ax.set_facecolor("#0B0B0E")
-ax.plot(t, env, "--", color="#52525B", linewidth=1.2, label=r"$e^{-x^2/2}$")
+ax.plot(t, env, "--", color="#52525B", linewidth=1.2, label=r"${D}e^{-x^2/2}${D}")
 ax.plot(t, -env, "--", color="#52525B", linewidth=1.2)
-ax.plot(t, y, color="#0A84FF", linewidth=2.2, label=r"$e^{-x^2/2}\cos(3x)$")
+ax.plot(t, y, color="#0A84FF", linewidth=2.2, label=r"${D}e^{-x^2/2}\cos(3x)${D}")
 ax.set_title("Gaussian Wave Packet", color="#F5F5F7", fontsize=12, pad=10)
 ax.tick_params(colors="#A1A1AA", labelsize=9)
 for spine in ax.spines.values():
