@@ -15,8 +15,8 @@ android {
         applicationId = "com.atelier.manim"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -101,4 +101,5 @@ dependencies {
 
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("com.github.luben:zstd-jni:1.5.7-4@aar")
+    implementation(files("libs/sherpa-onnx.aar"))
 }

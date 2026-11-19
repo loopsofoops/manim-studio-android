@@ -7,7 +7,10 @@ import sys
 import tempfile
 import zipfile
 
-ALLOWED_SYSTEM_LIBS = {"libc.so", "libdl.so", "libm.so", "liblog.so", "libz.so", "libstdc++.so"}
+ALLOWED_SYSTEM_LIBS = {
+    "libc.so", "libdl.so", "libm.so", "liblog.so", "libz.so", "libstdc++.so",
+    "libandroid.so", "libOpenSLES.so", "libaaudio.so", "libjnigraphics.so", "libc++_shared.so"
+}
 
 def inspect_elf(path: str, bundled_names: set) -> list:
     errors = []

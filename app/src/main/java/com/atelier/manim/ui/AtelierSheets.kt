@@ -55,6 +55,8 @@ import com.atelier.manim.data.LineDiff
 import com.atelier.manim.data.ProjectFileEntity
 import com.atelier.manim.runtime.ComputeProfile
 import com.atelier.manim.runtime.DiagnosticItem
+import com.atelier.manim.runtime.VoiceDownloadState
+import com.atelier.manim.runtime.VoiceModelSpec
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
 import com.atelier.manim.runtime.OutputFormat
@@ -249,6 +251,7 @@ fun LibrarySheet(
     activeFileId: Long?,
     onSelectFile: (ProjectFileEntity) -> Unit,
     onCreateFile: (String, String) -> Unit,
+    onCreateShowcase: (String) -> Unit,
     onDeleteFile: (ProjectFileEntity) -> Unit,
     onImportFiles: () -> Unit,
     onExportZip: () -> Unit,
@@ -307,10 +310,12 @@ fun LibrarySheet(
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                 listOf("PYTHON_MANIM" to "Manim", "PYTHON" to "Python", "LATEX" to "LaTeX").forEach { (k, label) ->
                     PillChip(label = label, selected = newLang == k) { newLang = k }
                 }
+                PillChip("+ Narrated Euler", false) { onCreateShowcase("narrated_euler"); onDismiss() }
+                PillChip("+ Epicycles HD", false) { onCreateShowcase("fourier_hd"); onDismiss() }
             }
 
             HorizontalDivider(color = colors.hairline)
@@ -826,6 +831,9 @@ fun SettingsSheet(
     autoSaveStorage: Boolean,
     autoExportCrashReports: Boolean,
     computeProfile: ComputeProfile,
+    voiceCatalog: List<VoiceModelSpec>,
+    installedVoiceIds: Set<String>,
+    voiceDownloadState: VoiceDownloadState,
     isDark: Boolean,
     fontSizeSp: Int,
     useNoSeccomp: Boolean,
@@ -833,6 +841,10 @@ fun SettingsSheet(
     onSelectFormat: (OutputFormat) -> Unit,
     onCustomDims: (Int, Int, Int) -> Unit,
     onSelectComputeProfile: (ComputeProfile) -> Unit,
+    onInstallVoice: (String) -> Unit,
+    onCancelVoiceDownload: () -> Unit,
+    onTestVoice: (String) -> Unit,
+    onDeleteVoice: (String) -> Unit,
     onToggleCache: (Boolean) -> Unit,
     onToggleAutoSave: (Boolean) -> Unit,
     onToggleAutoExportCrash: (Boolean) -> Unit,
@@ -916,6 +928,52 @@ fun SettingsSheet(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillChip("-", false) { onFontSize(fontSizeSp - 1) }
                     PillChip("+", false) { onFontSize(fontSizeSp + 1) }
+                }
+            }
+
+            HorizontalDivider(color = colors.hairline)
+            SectionTitle("Offline Neural Voice Models (sherpa-onnx)")
+            if (voiceDownloadState.activeModelId.isNotBlank()) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(colors.surfaceElevated)
+                        .border(1.dp, colors.accent.copy(alpha = 0.5f), RoundedCornerShape(10.dp)).padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(voiceDownloadState.stage, color = colors.textPrimary, fontSize = 11.sp)
+                    if (voiceDownloadState.progress in 0f..1f) {
+                        LinearProgressIndicator(progress = { voiceDownloadState.progress }, color = colors.accent, modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(color = colors.accent, modifier = Modifier.fillMaxWidth())
+                    }
+                    Text("Cancel Download", color = colors.error, fontSize = 11.sp, modifier = Modifier.clickable(onClick = onCancelVoiceDownload))
+                }
+            }
+            if (voiceDownloadState.error.isNotBlank()) {
+                Text(voiceDownloadState.error, color = colors.error, fontSize = 11.sp)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                voiceCatalog.forEach { vm ->
+                    val installed = vm.id in installedVoiceIds
+                    val busy = voiceDownloadState.activeModelId.isNotBlank()
+                    Column(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(colors.surfaceElevated)
+                            .border(1.dp, colors.hairline, RoundedCornerShape(10.dp)).padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(vm.name, color = colors.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            Text("${vm.approxSizeLabel} · ${vm.license}", color = colors.textMuted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                        }
+                        Text(vm.description, color = colors.textSecondary, fontSize = 11.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 3.dp)) {
+                            if (installed) {
+                                PillChip("Test Voice", true) { onTestVoice(vm.id) }
+                                PillChip("Remove", false) { onDeleteVoice(vm.id) }
+                            } else {
+                                PillChip(if (busy) "Busy..." else "Download", !busy) { if (!busy) onInstallVoice(vm.id) }
+                            }
+                        }
+                    }
                 }
             }
 

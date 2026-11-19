@@ -15,12 +15,108 @@ import java.util.UUID
 object StarterTemplates {
     private const val D = "$"
 
-    val fourierManim: String = """
+    val narratedEulerShowcase: String = """
+from manim import *
+import numpy as np
+
+try:
+    import atelier
+except Exception:
+    atelier = None
+
+
+def try_voice(scene, text, fallback_duration=2.4):
+    if atelier is None:
+        return fallback_duration
+    try:
+        cue = atelier.voice.say(text, normalize_math=True)
+        scene.add_sound(cue["path"])
+        return max(1.0, float(cue["duration"]))
+    except Exception:
+        return fallback_duration
+
+
+class NarratedEulerMasterpiece(MovingCameraScene):
+    def construct(self):
+        self.camera.background_color = "#06070B"
+        self.camera.frame.save_state()
+
+        plane = ComplexPlane(
+            x_range=[-3.2, 3.2, 1],
+            y_range=[-2.2, 2.2, 1],
+            x_length=8.8,
+            y_length=6.0,
+            background_line_style={"stroke_color": "#1E2433", "stroke_width": 1.2, "stroke_opacity": 0.7},
+        ).shift(DOWN * 0.2)
+        plane.add_coordinates(font_size=22, color="#6B7280")
+
+        title = MathTex(r"e^{i\theta} = \cos\theta + i\sin\theta", font_size=44, color="#F5F5F7")
+        title.to_edge(UP, buff=0.35)
+        title_bg = BackgroundRectangle(title, color="#06070B", fill_opacity=0.82, buff=0.14)
+
+        unit_circle = Circle(radius=plane.n2p(1)[0] - plane.n2p(0)[0], color="#38BDF8", stroke_width=2.6)
+        unit_circle.move_to(plane.n2p(0))
+
+        theta = ValueTracker(0.0)
+        z_point = lambda: plane.n2p(np.exp(1j * theta.get_value()))
+        origin = plane.n2p(0)
+
+        vec = always_redraw(lambda: Line(origin, z_point(), color="#38BDF8", stroke_width=3.6))
+        tip = always_redraw(lambda: Dot(z_point(), radius=0.08, color="#FFFFFF"))
+        cos_seg = always_redraw(lambda: Line(origin, plane.n2p(np.cos(theta.get_value())), color="#34D399", stroke_width=3.0))
+        sin_seg = always_redraw(lambda: Line(plane.n2p(np.cos(theta.get_value())), z_point(), color="#F472B6", stroke_width=3.0))
+        arc_angle = always_redraw(
+            lambda: Arc(radius=0.52, start_angle=0.0, angle=max(0.01, theta.get_value()), color="#FBBF24", stroke_width=2.4).move_arc_center_to(origin)
+        )
+        readout = always_redraw(
+            lambda: MathTex(
+                rf"\theta = {theta.get_value():.2f}\ \text{{rad}}",
+                font_size=30,
+                color="#FBBF24",
+            ).to_corner(UR, buff=0.45)
+        )
+
+        aura_path = TracedPath(lambda: z_point(), stroke_color="#38BDF8", stroke_width=9, stroke_opacity=0.22)
+        core_path = TracedPath(lambda: z_point(), stroke_color="#E0F2FE", stroke_width=2.6, stroke_opacity=0.95)
+
+        d1 = try_voice(self, "On the complex plane, multiplying by e to the i theta rotates a vector smoothly along the unit circle.", 2.6)
+        self.play(Create(plane), FadeIn(title_bg, title), run_time=min(1.4, d1 * 0.5))
+        self.play(Create(unit_circle), FadeIn(vec, tip, cos_seg, sin_seg, arc_angle, readout), run_time=max(0.6, d1 - 1.4))
+        self.add(aura_path, core_path)
+
+        d2 = try_voice(self, "Watch the real cosine shadow and imaginary sine height sweep to pi radians.", 2.8)
+        self.play(theta.animate.set_value(PI), run_time=d2, rate_func=smooth)
+
+        euler_eq = MathTex(r"e^{i\pi} + 1 = 0", font_size=54, color="#FDE047")
+        euler_eq.next_to(plane.n2p(-1), UP, buff=0.55)
+        euler_bg = BackgroundRectangle(euler_eq, color="#06070B", fill_opacity=0.9, buff=0.18)
+
+        d3 = try_voice(self, "At angle pi, we land directly on negative one, revealing Euler's identity: e to the i pi plus one equals zero.", 3.2)
+        self.play(
+            self.camera.frame.animate.scale(0.68).move_to(plane.n2p(-0.65) + UP * 0.2),
+            FadeIn(euler_bg),
+            Write(euler_eq),
+            run_time=min(1.8, d3 * 0.65),
+        )
+        self.wait(max(0.5, d3 - 1.8))
+
+        d4 = try_voice(self, "Completing the full turn returns smoothly to unity.", 2.2)
+        self.play(
+            Restore(self.camera.frame),
+            FadeOut(euler_bg, euler_eq),
+            theta.animate.set_value(TAU),
+            run_time=d4,
+            rate_func=smooth,
+        )
+        self.wait(0.6)
+""".trimStart()
+
+    val fourierManimOldUnused: String = """
 from manim import *
 import numpy as np
 
 
-class EulerFourierScene(Scene):
+class EulerFourierSceneLegacy(Scene):
     def construct(self):
         self.camera.background_color = "#070709"
 
@@ -69,6 +165,74 @@ class EulerFourierScene(Scene):
         self.play(Create(circle), FadeIn(dot, radius_line, proj_cos), run_time=0.8)
         self.play(theta.animate.set_value(2 * PI), run_time=3.2, rate_func=smooth)
         self.wait(0.6)
+""".trimStart()
+
+    val fourierManim: String = """
+from manim import *
+import numpy as np
+
+
+class FourierEpicyclesStudio(Scene):
+    def construct(self):
+        self.camera.background_color = "#06070A"
+
+        header = VGroup(
+            Text("FOURIER EPICYCLES", font_size=24, color="#94A3B8", weight=BOLD),
+            MathTex(r"z(t) = \sum_{k} c_k \, e^{i k t}", font_size=36, color="#F8FAFC"),
+        ).arrange(RIGHT, buff=0.55).to_edge(UP, buff=0.35)
+
+        # Intricate 5-lobe harmonic rose/epicycloid spectrum (fast & sharp on mobile CPU)
+        harmonics = [
+            (1, 1.42 + 0.0j, "#38BDF8"),
+            (-4, 0.56 + 0.14j, "#A78BFA"),
+            (6, 0.30 - 0.12j, "#34D399"),
+            (-9, 0.16 + 0.08j, "#FB7185"),
+            (11, 0.10 - 0.05j, "#FBBF24"),
+        ]
+        center = LEFT * 1.45 + DOWN * 0.35
+        t_tracker = ValueTracker(0.0)
+
+        def chain_points(t):
+            pts = [center]
+            z = 0j
+            for freq, coeff, _ in harmonics:
+                z += coeff * np.exp(1j * freq * t)
+                pts.append(center + np.array([z.real, z.imag, 0.0]))
+            return pts
+
+        epicycles = always_redraw(lambda: self._build_chain(chain_points(t_tracker.get_value()), harmonics))
+        tip_dot = always_redraw(lambda: Dot(chain_points(t_tracker.get_value())[-1], radius=0.065, color="#FFFFFF"))
+        aura = TracedPath(lambda: chain_points(t_tracker.get_value())[-1], stroke_color="#38BDF8", stroke_width=8.5, stroke_opacity=0.22)
+        core = TracedPath(lambda: chain_points(t_tracker.get_value())[-1], stroke_color="#E0F2FE", stroke_width=2.4, stroke_opacity=0.98)
+
+        # Spectrum readout panel on right
+        spec_title = Text("HARMONICS", font_size=18, color="#64748B", weight=BOLD)
+        bars = VGroup()
+        for freq, coeff, col in harmonics:
+            mag = abs(coeff)
+            lbl = MathTex(rf"k={freq:+d}", font_size=24, color="#CBD5E1")
+            bar = Rectangle(width=max(0.18, mag * 1.6), height=0.18, fill_color=col, fill_opacity=0.85, stroke_width=0)
+            bars.add(VGroup(lbl, bar).arrange(RIGHT, buff=0.2))
+        bars.arrange(DOWN, aligned_edge=LEFT, buff=0.22)
+        panel = VGroup(spec_title, bars).arrange(DOWN, aligned_edge=LEFT, buff=0.28).to_edge(RIGHT, buff=0.55).shift(DOWN * 0.25)
+
+        self.play(Write(header), FadeIn(panel, shift=LEFT * 0.2), run_time=1.0)
+        self.play(FadeIn(epicycles, tip_dot), run_time=0.6)
+        self.add(aura, core)
+        self.play(t_tracker.animate.set_value(TAU), run_time=5.5, rate_func=linear)
+        self.play(FadeOut(epicycles), run_time=0.7)
+        self.wait(0.8)
+
+    def _build_chain(self, pts, harmonics):
+        grp = VGroup()
+        for i, (_, coeff, col) in enumerate(harmonics):
+            p0, p1 = pts[i], pts[i + 1]
+            r = float(np.linalg.norm(p1 - p0))
+            if r > 1e-4:
+                grp.add(Circle(radius=r, color=col, stroke_width=1.3, stroke_opacity=0.45).move_to(p0))
+                grp.add(Line(p0, p1, color=col, stroke_width=2.4))
+                grp.add(Dot(p0, radius=0.032, color="#94A3B8"))
+        return grp
 """.trimStart()
 
     val surface3dManim: String = """
@@ -335,6 +499,7 @@ class WorkspaceRepository(
         if (existing.isNotEmpty()) return@withContext existing
 
         val seeds = listOf(
+            Triple("narrated_euler_studio.py", "PYTHON_MANIM", StarterTemplates.narratedEulerShowcase),
             Triple("fourier_epicycles.py", "PYTHON_MANIM", StarterTemplates.fourierManim),
             Triple("surface_wave_3d.py", "PYTHON_MANIM", StarterTemplates.surface3dManim),
             Triple("theorem_notes.tex", "LATEX", StarterTemplates.latexDocument),

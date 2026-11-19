@@ -38,7 +38,8 @@ class ExecutionCoordinator(
     private val mediaExport: MediaExportManager,
     private val dao: AtelierDao,
     private val blobStore: HistoryBlobStore,
-    private val crashReporter: CrashReporter
+    private val crashReporter: CrashReporter,
+    private val onBeforeHeavyRender: () -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val taskMutex = Mutex()
@@ -144,6 +145,7 @@ class ExecutionCoordinator(
         autoSaveToStorage: Boolean
     ) {
         launchTask(modeLabel = "Manim · $sceneName", initialStage = "Preparing scene...") { startMs ->
+            onBeforeHeavyRender()
             val savedRev = workspaceRepo.saveFile(file, code, label = "Pre-render", triggerType = "EDIT")
             val effFormat = if (renderMode == ManimRenderMode.STILL) OutputFormat.PNG_LAST else outputFormat
             val w = when {
@@ -598,6 +600,7 @@ class ExecutionCoordinator(
         autoSaveToStorage: Boolean
     ): JSONObject {
         val startMs = System.currentTimeMillis()
+        onBeforeHeavyRender()
         val savedRev = workspaceRepo.saveFile(file, code, label = "AI Pre-render", triggerType = "AI_CTRL")
         val effFormat = if (renderMode == ManimRenderMode.STILL) OutputFormat.PNG_LAST else outputFormat
         val w = when { renderMode == ManimRenderMode.DRAFT -> 854; preset == ManimPreset.CUSTOM -> max(160, customWidth); else -> preset.width }

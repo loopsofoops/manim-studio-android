@@ -23,7 +23,8 @@ class AtelierBridgeServer(
     private val coordinator: ExecutionCoordinator,
     private val crashReporter: CrashReporter,
     private val inspector: StudioInspector,
-    private val mediaExport: MediaExportManager
+    private val mediaExport: MediaExportManager,
+    private val voiceEngine: OfflineVoiceEngine
 ) {
     val token: String = ByteArray(24).apply { SecureRandom().nextBytes(this) }
         .joinToString("") { String.format("%02x", it) }
@@ -263,6 +264,69 @@ class AtelierBridgeServer(
         }
         "pip.install" -> coordinator.runPipBlockingForBridge("install", p.optString("packages", ""))
         "pip.list" -> coordinator.runPipBlockingForBridge("list", "")
+
+        "voice.models" -> voiceEngine.catalogJson()
+        "voice.install" -> runBlocking {
+            val id = p.getString("model")
+            val spec = voiceEngine.catalog.firstOrNull { it.id == id } ?: error("Unknown voice model: $id")
+            voiceEngine.installModelBlocking(spec)
+            JSONObject().put("installed", true).put("model", spec.id).put("summary", "installed ${spec.id}")
+        }
+        "voice.delete" -> {
+            val id = p.getString("model")
+            voiceEngine.deleteModel(id)
+            JSONObject().put("deleted", id)
+        }
+        "voice.normalize_math" -> JSONObject().put("normalized", voiceEngine.normalizer.normalize(p.getString("text")))
+        "voice.glossary_get" -> JSONObject().apply { voiceEngine.normalizer.getGlossary().forEach { (k, v) -> put(k, v) } }
+        "voice.glossary_set" -> {
+            val obj = p.getJSONObject("entries")
+            val map = linkedMapOf<String, String>()
+            val ks = obj.keys()
+            while (ks.hasNext()) { val k = ks.next(); map[k] = obj.optString(k, "") }
+            voiceEngine.normalizer.setGlossaryEntries(map)
+            JSONObject().put("updated", map.size)
+        }
+        "voice.say" -> {
+            val res = voiceEngine.synthesize(
+                text = p.getString("text"),
+                modelId = p.optString("model", ""),
+                sid = p.optInt("sid", -1),
+                speed = p.optDouble("speed", 1.0).toFloat(),
+                normalizeMath = p.optBoolean("normalize_math", true),
+                customOutName = p.optString("out_name", "")
+            )
+            val wordsArr = JSONArray().apply {
+                res.words.forEach { w -> put(JSONObject().put("word", w.word).put("start", w.startSec).put("end", w.endSec)) }
+            }
+            JSONObject().apply {
+                put("path", res.wavGuestPath)
+                put("hostPath", res.wavHostPath)
+                put("duration", res.durationSec)
+                put("sampleRate", res.sampleRate)
+                put("normalizedText", res.normalizedText)
+                put("cached", res.cached)
+                put("model", res.modelId)
+                put("sid", res.sid)
+                put("words", wordsArr)
+                put("summary", String.format(java.util.Locale.US, "%.2fs (%s)", res.durationSec, if (res.cached) "cache" else res.modelId))
+            }
+        }
+        "voice.synthesize_script" -> {
+            val arr = p.getJSONArray("lines")
+            val lines = (0 until arr.length()).map { arr.getString(it) }
+            voiceEngine.synthesizeScript(
+                lines = lines,
+                modelId = p.optString("model", ""),
+                sid = p.optInt("sid", -1),
+                speed = p.optDouble("speed", 1.0).toFloat(),
+                pauseSec = p.optDouble("pause_sec", 0.28),
+                normalizeMath = p.optBoolean("normalize_math", true),
+                manifestName = p.optString("manifest_name", "timing_manifest.json"),
+                srtName = p.optString("srt_name", "captions.srt")
+            )
+        }
+        "voice.release" -> { voiceEngine.release(); JSONObject().put("released", true) }
 
         "app.switch_mode" -> {
             val mode = StudioMode.entries.firstOrNull { it.name.equals(p.optString("mode"), true) } ?: error("Expected CODE or CONTROL")

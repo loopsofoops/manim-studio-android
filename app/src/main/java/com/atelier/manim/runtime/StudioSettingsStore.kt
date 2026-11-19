@@ -229,6 +229,12 @@ class StudioSettingsStore(context: Context) {
                 code = "import atelier\n\nactive = atelier.inspect.active_file(include_content=False)\npath = active[\"relativePath\"]\nscenes = atelier.manim.detect_scenes(path)\nprint(\"Scenes:\", scenes)\nfor sc in scenes:\n    res = atelier.manim.render(path, scene=sc)\n    print(sc, \"exit=\", res.get(\"exitCode\"), res.get(\"outputPath\"))\natelier.app.toast(f\"Rendered {len(scenes)} scene(s)\")\n"
             ),
             ControllerMacro(
+                id = "narrated_pipeline",
+                name = "Narrated Episode Run",
+                description = "Synthesize math narration with offline TTS, build timing manifest + SRT, and render showcase",
+                code = "import atelier\n\nmodels = atelier.voice.models()\ninstalled = [m[\"id\"] for m in models if m[\"installed\"]]\nprint(\"Installed voice models:\", installed)\nif not installed:\n    print(\"Installing fast Kitten Nano voice (~35 MB)...\")\n    atelier.voice.install(\"kitten_nano_en\")\n\nscript = [\n    \"On the complex plane, multiplying by e^{i\\\\theta} rotates smoothly along the unit circle.\",\n    \"At angle \\\\pi, we reach negative one, revealing Euler's identity: e^{i\\\\pi} + 1 = 0.\",\n]\nmanifest = atelier.voice.synthesize_script(script, normalize_math=True)\nprint(\"Manifest:\", manifest[\"manifestPath\"], \"SRT:\", manifest[\"srtPath\"], \"Total:\", manifest[\"totalDurationSec\"], \"s\")\natelier.app.toast(f\"Voice ready ({manifest['totalDurationSec']}s) + SRT generated\")\n"
+            ),
+            ControllerMacro(
                 id = "draft_check",
                 name = "Quick Draft Check",
                 description = "Render active scene in 480p15 Draft and copy error log on failure",

@@ -21,6 +21,8 @@ import com.atelier.manim.runtime.ControllerStep
 import com.atelier.manim.runtime.CrashReportEntry
 import com.atelier.manim.runtime.StudioMode
 import com.atelier.manim.runtime.StudioUiEvent
+import com.atelier.manim.runtime.VoiceDownloadState
+import com.atelier.manim.runtime.VoiceModelSpec
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
 import com.atelier.manim.runtime.ManimRenderMode
@@ -58,6 +60,9 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     val consoleLog: StateFlow<String> = app.coordinator.consoleLog
     val crashReports: StateFlow<List<CrashReportEntry>> = app.crashReporter.reports
     val pendingCrashAlert: StateFlow<CrashReportEntry?> = app.crashReporter.pendingCrashAlert
+    val voiceCatalog: List<VoiceModelSpec> get() = app.voiceEngine.catalog
+    val installedVoiceIds: StateFlow<Set<String>> = app.voiceEngine.installedIds
+    val voiceDownloadState: StateFlow<VoiceDownloadState> = app.voiceEngine.downloadState
 
     val files: StateFlow<List<ProjectFileEntity>> = app.workspaceRepo.observeFiles()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -255,6 +260,38 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             val created = app.workspaceRepo.createFile(name, language, template)
             openFile(created)
             showToast("Created ${created.relativePath}")
+        }
+    }
+
+    fun createFromShowcaseTemplate(key: String) {
+        viewModelScope.launch {
+            val (name, lang, code) = when (key) {
+                "narrated_euler" -> Triple("narrated_euler_studio.py", "PYTHON_MANIM", StarterTemplates.narratedEulerShowcase)
+                "fourier_hd" -> Triple("fourier_epicycles_hd.py", "PYTHON_MANIM", StarterTemplates.fourierManim)
+                else -> Triple("surface_wave_3d.py", "PYTHON_MANIM", StarterTemplates.surface3dManim)
+            }
+            val created = app.workspaceRepo.createFile(name, lang, code)
+            openFile(created)
+            showToast("Created ${created.relativePath}")
+        }
+    }
+
+    fun installVoiceModel(modelId: String) = app.voiceEngine.startInstallModel(modelId)
+    fun cancelVoiceDownload() = app.voiceEngine.cancelInstall()
+    fun deleteVoiceModel(modelId: String) {
+        app.voiceEngine.deleteModel(modelId)
+        showToast("Removed voice model")
+    }
+    fun testVoiceModel(modelId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val res = app.voiceEngine.synthesize(
+                    text = "Welcome to Atelier. Euler's identity e^{i\\pi} + 1 = 0 connects five fundamental constants.",
+                    modelId = modelId, normalizeMath = true
+                )
+                app.voiceEngine.playPreviewWav(res.wavHostPath)
+                showToast("Playing sample (${String.format("%.1fs", res.durationSec)})")
+            }.onFailure { showToast(it.message ?: "Voice test failed") }
         }
     }
 
@@ -641,5 +678,6 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     override fun onCleared() {
         super.onCleared()
         app.coordinator.replSession.close()
+        app.voiceEngine.release()
     }
 }

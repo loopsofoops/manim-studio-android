@@ -27,7 +27,8 @@ class StudioInspector(
     private val coordinator: ExecutionCoordinator,
     private val crashReporter: CrashReporter,
     private val dao: AtelierDao,
-    private val bridgePortProvider: () -> Int = { 0 }
+    private val bridgePortProvider: () -> Int = { 0 },
+    private val voiceEngine: OfflineVoiceEngine? = null
 ) {
     @Volatile var activeFileName: String = ""
     @Volatile var activeFilePath: String = ""
@@ -104,6 +105,10 @@ class StudioInspector(
                 else -> {}
             }
             put("userSitePackages", JSONArray(userPkgs))
+            if (voiceEngine != null) {
+                put("voiceModels", voiceEngine.catalogJson())
+                put("voiceCache", voiceEngine.cacheStatsSummary())
+            }
         }
     }
 
@@ -243,6 +248,10 @@ class StudioInspector(
             if (rt.has("pythonVersion")) appendLine("- Toolchain: Python ${rt.optString("pythonVersion")} · Manim ${rt.optString("manimVersion")} · GCC ${rt.optString("gccVersion")}")
             val pkgs = rt.optJSONArray("userSitePackages")
             if (pkgs != null && pkgs.length() > 0) appendLine("- /user-site (${pkgs.length()}): ${(0 until pkgs.length()).map { pkgs.getString(it) }.joinToString(", ")}")
+            if (voiceEngine != null) {
+                val installed = voiceEngine.catalog.filter { voiceEngine.isModelInstalled(it) }.map { it.id }
+                appendLine("- Offline Voice Models Installed (${installed.size}/${voiceEngine.catalog.size}): ${installed.joinToString(", ").ifBlank { "none" }} · ${voiceEngine.cacheStatsSummary()}")
+            }
             appendLine("\n## Settings")
             val keys = set.keys()
             while (keys.hasNext()) { val k = keys.next(); appendLine("- $k: ${set.opt(k)}") }
@@ -349,6 +358,11 @@ class StudioInspector(
         appendLine("- `atelier.manim.render_draft(path, scene='')` / `render_still(path, scene='')` / `render_range(path, scene, start, end)`")
         appendLine("- `atelier.latex.compile(path, auto_save=None)` / `atelier.python.run(path)` / `atelier.python.compile(path, native=False)`")
         appendLine("- `atelier.pip.install(packages)` / `atelier.pip.list()`")
+        appendLine("\n## Native Offline Voice TTS (sherpa-onnx + Math-to-Speech)")
+        appendLine("- `atelier.voice.models()` / `install('kitten_nano_en'|'kokoro_en_019'|'kokoro_multi_10'|'piper_en_ryan'|'piper_hi_rohan')` / `delete(id)`")
+        appendLine("- `atelier.voice.say(text, model='', sid=-1, speed=1.0, normalize_math=True, out_name='')` -> `{path, duration, sampleRate, normalizedText, cached, words}`")
+        appendLine("- `atelier.voice.synthesize_script(lines, model='', sid=-1, speed=1.0, pause_sec=0.28)` -> writes `timing_manifest.json` + `captions.srt`")
+        appendLine("- `atelier.voice.normalize_math(text)` / `glossary_get()` / `glossary_set({...})` / `release()`")
         appendLine("\n## App, Clipboard, Macros & Rollback")
         appendLine("- `atelier.app.switch_mode('CODE'|'CONTROL')` / `toast(msg)` / `notify(title, msg, copy_text='')`")
         appendLine("- `atelier.app.clipboard_set(text)` / `clipboard_get()` / `export_artifact()`")

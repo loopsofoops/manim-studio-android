@@ -36,6 +36,18 @@ jobs:
           tar -xzf /tmp/proot-arm64-v8a.tar.gz -C app/src/main/jniLibs/arm64-v8a
           ls -lh app/src/main/jniLibs/arm64-v8a
 
+      - name: Fetch Sherpa-ONNX Native Offline TTS AAR (v1.13.8)
+        run: |
+          mkdir -p app/libs
+          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar"
+          if ! curl -fsSL --retry 3 "$AAR_URL" -o app/libs/sherpa-onnx.aar; then
+            echo "Fallback: resolving latest 1.x sherpa-onnx AAR from GitHub releases..."
+            AAR_URL=$(curl -fsSL "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases?per_page=15" | python3 -c "import json,sys; rels=json.load(sys.stdin); urls=[a['browser_download_url'] for r in rels if r.get('tag_name','').startswith('v1.') for a in r.get('assets',[]) if a['name'].endswith('.aar') and '16kb' not in a['name'].lower()]; print(urls[0])")
+            curl -fsSL --retry 3 "$AAR_URL" -o app/libs/sherpa-onnx.aar
+          fi
+          test -s app/libs/sherpa-onnx.aar
+          ls -lh app/libs/sherpa-onnx.aar
+
       - name: Provision Release Keystore Safely with Python
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}

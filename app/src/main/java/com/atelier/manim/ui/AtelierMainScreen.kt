@@ -89,6 +89,8 @@ fun AtelierMainScreen(
     val controllerSteps by viewModel.controllerSteps.collectAsState()
     val macros by viewModel.macros.collectAsState()
     val lastTxId by viewModel.lastTransactionId.collectAsState()
+    val installedVoiceIds by viewModel.installedVoiceIds.collectAsState()
+    val voiceDownloadState by viewModel.voiceDownloadState.collectAsState()
     val isDark by viewModel.isDarkTheme.collectAsState()
     val fontSizeSp by viewModel.fontSizeSp.collectAsState()
     val replEntries by viewModel.replEntries.collectAsState()
@@ -444,6 +446,7 @@ fun AtelierMainScreen(
             activeFileId = activeFile?.id,
             onSelectFile = { viewModel.openFile(it) },
             onCreateFile = { name, lang -> viewModel.createNewFile(name, lang) },
+            onCreateShowcase = { viewModel.createFromShowcaseTemplate(it) },
             onDeleteFile = { viewModel.deleteFile(it) },
             onImportFiles = onImportFiles,
             onExportZip = onExportWorkspaceZip,
@@ -524,6 +527,9 @@ fun AtelierMainScreen(
             autoSaveStorage = autoSaveStorage,
             autoExportCrashReports = autoExportCrash,
             computeProfile = computeProfile,
+            voiceCatalog = viewModel.voiceCatalog,
+            installedVoiceIds = installedVoiceIds,
+            voiceDownloadState = voiceDownloadState,
             isDark = isDark,
             fontSizeSp = fontSizeSp,
             useNoSeccomp = viewModel.getUseNoSeccomp(),
@@ -531,6 +537,10 @@ fun AtelierMainScreen(
             onSelectFormat = { viewModel.selectOutputFormat(it) },
             onCustomDims = { w, h, f -> viewModel.setCustomDimensions(w, h, f) },
             onSelectComputeProfile = { viewModel.setComputeProfile(it) },
+            onInstallVoice = { viewModel.installVoiceModel(it) },
+            onCancelVoiceDownload = { viewModel.cancelVoiceDownload() },
+            onTestVoice = { viewModel.testVoiceModel(it) },
+            onDeleteVoice = { viewModel.deleteVoiceModel(it) },
             onToggleCache = { viewModel.setDisableCache(it) },
             onToggleAutoSave = { viewModel.setAutoSaveStorage(it) },
             onToggleAutoExportCrash = { viewModel.setAutoExportCrashReports(it) },

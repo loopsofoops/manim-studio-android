@@ -10,3 +10,4 @@
 .cxx
 app/release-key.jks
 app/src/main/jniLibs/
+app/libs/*.aar
