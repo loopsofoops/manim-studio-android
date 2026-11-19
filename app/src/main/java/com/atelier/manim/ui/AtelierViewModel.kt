@@ -16,7 +16,11 @@ import com.atelier.manim.data.RenderHistoryEntity
 import com.atelier.manim.data.StarterTemplates
 import com.atelier.manim.data.detectManimScenes
 import com.atelier.manim.runtime.ComputeProfile
+import com.atelier.manim.runtime.ControllerMacro
+import com.atelier.manim.runtime.ControllerStep
 import com.atelier.manim.runtime.CrashReportEntry
+import com.atelier.manim.runtime.StudioMode
+import com.atelier.manim.runtime.StudioUiEvent
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
 import com.atelier.manim.runtime.ManimRenderMode
@@ -92,6 +96,15 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     val isDarkTheme: StateFlow<Boolean> = settings.isDarkTheme
     val fontSizeSp: StateFlow<Int> = settings.fontSizeSp
     val computeProfile: StateFlow<ComputeProfile> = settings.computeProfile
+    val studioMode: StateFlow<StudioMode> = settings.studioMode
+    val macros: StateFlow<List<ControllerMacro>> = settings.macros
+    val controllerSteps: StateFlow<List<ControllerStep>> = app.coordinator.controllerSteps
+    val lastTransactionId: StateFlow<String> = app.coordinator.lastTransactionId
+
+    private val _controllerValue = MutableStateFlow(
+        TextFieldValue("import atelier\n\nsnap = atelier.inspect.full_snapshot()\nprint(snap[:1200])\n")
+    )
+    val controllerValue: StateFlow<TextFieldValue> = _controllerValue.asStateFlow()
 
     private val _replEntries = MutableStateFlow<List<ReplEntry>>(emptyList())
     val replEntries: StateFlow<List<ReplEntry>> = _replEntries.asStateFlow()
@@ -119,6 +132,42 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             app.workspaceRepo.syncWorkspaceFromDisk()
             val all = app.workspaceRepo.ensureSeeded()
             if (all.isNotEmpty()) openFile(all.first())
+        }
+        viewModelScope.launch {
+            settings.uiEvents.collect { ev ->
+                when (ev) {
+                    is StudioUiEvent.OpenFile -> {
+                        val f = app.workspaceRepo.findOrSyncFile(ev.relativePath)
+                        if (f != null) openFile(f)
+                    }
+                    is StudioUiEvent.ReloadIfActive -> {
+                        val cur = _activeFile.value
+                        if (cur != null && cur.relativePath == ev.relativePath) {
+                            val fresh = app.workspaceRepo.readFile(cur)
+                            _editorValue.value = TextFieldValue(fresh, TextRange(min(_editorValue.value.selection.start, fresh.length)))
+                            _isDirty.value = false
+                            refreshDetectedScenes(fresh, cur.language)
+                            syncInspectorLiveState()
+                        }
+                    }
+                    is StudioUiEvent.ShowToast -> showToast(ev.message)
+                    is StudioUiEvent.SyncWorkspace -> {
+                        app.workspaceRepo.syncWorkspaceFromDisk()
+                        val cur = _activeFile.value
+                        if (cur != null) {
+                            val freshEnt = app.workspaceRepo.findOrSyncFile(cur.relativePath)
+                            if (freshEnt != null) {
+                                val fresh = app.workspaceRepo.readFile(freshEnt)
+                                _activeFile.value = freshEnt
+                                _editorValue.value = TextFieldValue(fresh, TextRange(min(_editorValue.value.selection.start, fresh.length)))
+                                _isDirty.value = false
+                                refreshDetectedScenes(fresh, freshEnt.language)
+                                syncInspectorLiveState()
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -325,6 +374,62 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     fun clearConsole() = app.coordinator.clearConsole()
     fun clearBanner() = app.coordinator.clearBanner()
 
+    // ---- AI System Controller Actions ----
+    fun setStudioMode(mode: StudioMode) = settings.setStudioMode(mode)
+    fun onControllerCodeEdited(v: TextFieldValue) { _controllerValue.value = v }
+
+    fun runControllerScript() {
+        autosaveJob?.cancel()
+        viewModelScope.launch {
+            flushSaveIfDirty()
+            syncInspectorLiveState()
+            app.coordinator.runControllerScript(_controllerValue.value.text)
+        }
+    }
+
+    fun pasteAndRunController() {
+        val clip = app.mediaExport.readFromClipboard().trim()
+        if (clip.isBlank()) {
+            showToast("Clipboard is empty")
+            return
+        }
+        _controllerValue.value = TextFieldValue(clip, TextRange(0))
+        runControllerScript()
+    }
+
+    fun copyApiAndContext() {
+        viewModelScope.launch(Dispatchers.IO) {
+            syncInspectorLiveState()
+            val text = app.inspector.buildSdkSchemaMarkdown()
+            app.mediaExport.copyToClipboard("Atelier AI Controller SDK", text)
+            showToast("Copied API Schema + Workspace Context")
+        }
+    }
+
+    fun rollbackLastControllerRun() {
+        val txId = lastTransactionId.value
+        if (txId.isBlank()) { showToast("Nothing to roll back"); return }
+        viewModelScope.launch {
+            val count = app.workspaceRepo.rollbackTransaction(txId)
+            settings.emitUiEvent(StudioUiEvent.SyncWorkspace)
+            showToast("Rolled back $count file(s)")
+        }
+    }
+
+    fun loadMacro(macro: ControllerMacro) {
+        _controllerValue.value = TextFieldValue(macro.code, TextRange(0))
+        showToast("Loaded macro: ${macro.name}")
+    }
+
+    fun saveControllerMacro(name: String, description: String) {
+        val saved = settings.saveMacro(name, description, _controllerValue.value.text)
+        showToast("Saved macro: ${saved.name}")
+    }
+
+    fun deleteControllerMacro(id: String) {
+        settings.deleteMacro(id)
+    }
+
     // ---- Introspection & Clipboard Copy Helpers ----
     suspend fun loadInspectorSection(tabIdx: Int): String = withContext(Dispatchers.IO) {
         syncInspectorLiveState()
@@ -332,7 +437,8 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             0 -> app.inspector.buildFullSnapshotMarkdown()
             1 -> app.inspector.buildFileTreeMarkdown()
             2 -> app.inspector.buildActiveFileAndErrorsMarkdown()
-            else -> app.inspector.buildSettingsAndStatusMarkdown()
+            3 -> app.inspector.buildSettingsAndStatusMarkdown()
+            else -> app.inspector.buildSdkSchemaMarkdown()
         }
     }
 

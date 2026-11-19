@@ -252,10 +252,10 @@ fun AtelierCodeEditor(
         HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
         val snippets = remember(language) {
-            if (language == "LATEX") {
-                listOf("    " to "Tab", "\\" to "\\", "{}" to "{}", "$" to "$", "\\frac{}{}" to "frac", "\\int_{}^{}" to "int", "\\sum_{}^{}" to "sum", "\\begin{}\n\n\\end{}" to "env")
-            } else {
-                listOf("    " to "Tab", "self.play(" to "play(", "MathTex(r\"\")" to "MathTex", "r\"\"" to "r\"\"", "()" to "()", "[]" to "[]", "{}" to "{}", "\\" to "\\", ":" to ":", "=" to "=")
+            when (language) {
+                "LATEX" -> listOf("    " to "Tab", "\\" to "\\", "{}" to "{}", "$" to "$", "\\frac{}{}" to "frac", "\\int_{}^{}" to "int", "\\sum_{}^{}" to "sum", "\\begin{}\n\n\\end{}" to "env")
+                "CONTROLLER" -> listOf("    " to "Tab", "atelier." to "atelier.", "atelier.inspect." to "inspect", "atelier.files." to "files", "atelier.manim." to "manim", "atelier.settings." to "settings", "atelier.app." to "app", "()" to "()", "\"\"" to "\"\"", ":" to ":")
+                else -> listOf("    " to "Tab", "self.play(" to "play(", "MathTex(r\"\")" to "MathTex", "r\"\"" to "r\"\"", "()" to "()", "[]" to "[]", "{}" to "{}", "\\" to "\\", ":" to ":", "=" to "=")
             }
         }
 

@@ -43,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.atelier.manim.runtime.ManimRenderMode
+import com.atelier.manim.runtime.StudioMode
 import com.atelier.manim.runtime.OutputKind
 import com.atelier.manim.runtime.RuntimeState
 import com.atelier.manim.ui.editor.AtelierCodeEditor
@@ -83,6 +84,11 @@ fun AtelierMainScreen(
     val autoSaveStorage by viewModel.autoSaveStorage.collectAsState()
     val autoExportCrash by viewModel.autoExportCrashReports.collectAsState()
     val computeProfile by viewModel.computeProfile.collectAsState()
+    val studioMode by viewModel.studioMode.collectAsState()
+    val controllerValue by viewModel.controllerValue.collectAsState()
+    val controllerSteps by viewModel.controllerSteps.collectAsState()
+    val macros by viewModel.macros.collectAsState()
+    val lastTxId by viewModel.lastTransactionId.collectAsState()
     val isDark by viewModel.isDarkTheme.collectAsState()
     val fontSizeSp by viewModel.fontSizeSp.collectAsState()
     val replEntries by viewModel.replEntries.collectAsState()
@@ -150,7 +156,7 @@ fun AtelierMainScreen(
                         if (stageExpanded) stageExpanded = false else showStage = !showStage
                     }
                     TopIconBtn(AtelierIcons.Inspect, active = pendingCrashAlert != null) {
-                        inspectorInitialTab = if (pendingCrashAlert != null) 4 else 0
+                        inspectorInitialTab = if (pendingCrashAlert != null) 5 else 0
                         showInspectorSheet = true
                     }
                     TopIconBtn(AtelierIcons.History, active = false) { showHistorySheet = true }
@@ -175,6 +181,9 @@ fun AtelierMainScreen(
                                 when {
                                     execution.isRunning -> viewModel.cancelExecution()
                                     !isReady -> showRuntimeSheet = true
+                                    studioMode == StudioMode.CONTROL -> {
+                                        viewModel.runControllerScript()
+                                    }
                                     else -> {
                                         showStage = true
                                         viewModel.runPrimaryAction()
@@ -194,6 +203,7 @@ fun AtelierMainScreen(
                         val actionText = when {
                             execution.isRunning -> "Stop"
                             !isReady -> "Setup"
+                            studioMode == StudioMode.CONTROL -> "Exec"
                             activeFile?.language == "LATEX" -> "Build"
                             detectedScenes.isNotEmpty() -> "Render"
                             else -> "Run"
@@ -215,13 +225,13 @@ fun AtelierMainScreen(
                     Text(
                         text = "${alert.title}: ${alert.summary}",
                         color = colors.error, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f).clickable { inspectorInitialTab = 4; showInspectorSheet = true }
+                        modifier = Modifier.weight(1f).clickable { inspectorInitialTab = 5; showInspectorSheet = true }
                     )
                     Text("Copy", color = colors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable {
                         viewModel.copyToClipboard(alert.title, viewModel.readCrashReport(alert))
                     })
                     Text("View", color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable {
-                        inspectorInitialTab = 4; showInspectorSheet = true
+                        inspectorInitialTab = 5; showInspectorSheet = true
                     })
                     Icon(AtelierIcons.Close, "Dismiss", tint = colors.textSecondary, modifier = Modifier.size(15.dp).clickable { viewModel.dismissPendingCrashAlert() })
                 }
@@ -248,6 +258,30 @@ fun AtelierMainScreen(
                 HorizontalDivider(thickness = 1.dp, color = colors.hairline)
             }
 
+            if (studioMode == StudioMode.CONTROL) {
+                ControlWorkspace(
+                    controllerValue = controllerValue,
+                    fontSizeSp = fontSizeSp,
+                    execution = execution,
+                    consoleLog = consoleLog,
+                    steps = controllerSteps,
+                    macros = macros,
+                    canRollback = lastTxId.isNotBlank(),
+                    isRuntimeReady = runtimeState is RuntimeState.Ready,
+                    onValueChange = { viewModel.onControllerCodeEdited(it) },
+                    onPasteAndRun = { viewModel.pasteAndRunController() },
+                    onRun = { viewModel.runControllerScript() },
+                    onStop = { viewModel.cancelExecution() },
+                    onCopyApiAndContext = { viewModel.copyApiAndContext() },
+                    onCopyOutput = { viewModel.copyFullConsoleLog() },
+                    onRollback = { viewModel.rollbackLastControllerRun() },
+                    onSelectMacro = { viewModel.loadMacro(it) },
+                    onSaveMacro = { n, d -> viewModel.saveControllerMacro(n, d) },
+                    onDeleteMacro = { viewModel.deleteControllerMacro(it) },
+                    onOpenRuntimeSetup = { showRuntimeSheet = true },
+                    modifier = Modifier.weight(1f).fillMaxWidth()
+                )
+            } else {
             // 3. Context Action Strip (Scenes + Preset + Fast-Pass Draft/Still/Range + Snapshot)
             if (!stageExpanded) {
                 Row(
@@ -323,6 +357,34 @@ fun AtelierMainScreen(
                     onJumpHandled = { jumpToLine = null },
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 )
+            }
+            }
+
+            // Minimalist Studio Mode Switcher (Code | Control)
+            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+            Row(
+                modifier = Modifier.fillMaxWidth().height(38.dp).background(colors.surface).padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StudioMode.entries.forEach { mode ->
+                    val selected = studioMode == mode
+                    Box(
+                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(7.dp))
+                            .background(if (selected) colors.surfaceElevated else Color.Transparent)
+                            .border(1.dp, if (selected) colors.accent.copy(alpha = 0.65f) else Color.Transparent, RoundedCornerShape(7.dp))
+                            .clickable { viewModel.setStudioMode(mode) }
+                            .padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (mode == StudioMode.CODE) "Code Studio" else "AI Control",
+                            color = if (selected) colors.textPrimary else colors.textSecondary,
+                            fontSize = 11.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                        )
+                    }
+                }
             }
         }
 

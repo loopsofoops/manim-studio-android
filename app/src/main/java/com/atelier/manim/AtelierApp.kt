@@ -5,6 +5,7 @@ import com.atelier.manim.data.AtelierDatabase
 import com.atelier.manim.data.HistoryBlobStore
 import com.atelier.manim.data.MediaExportManager
 import com.atelier.manim.data.WorkspaceRepository
+import com.atelier.manim.runtime.AtelierBridgeServer
 import com.atelier.manim.runtime.CrashReporter
 import com.atelier.manim.runtime.ExecutionCoordinator
 import com.atelier.manim.runtime.ProotEngine
@@ -36,6 +37,8 @@ class AtelierApp : Application() {
         private set
     lateinit var inspector: StudioInspector
         private set
+    lateinit var bridgeServer: AtelierBridgeServer
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -50,7 +53,14 @@ class AtelierApp : Application() {
         crashReporter.installUncaughtExceptionHandler()
 
         runtimeManager = RuntimeManager(this)
-        prootEngine = ProotEngine(this, runtimeManager) { settingsStore.computeProfile.value.threads }
+        runtimeManager.deployAtelierSdk()
+
+        prootEngine = ProotEngine(
+            context = this,
+            runtimeManager = runtimeManager,
+            threadsProvider = { settingsStore.computeProfile.value.threads },
+            bridgeInfoProvider = { if (::bridgeServer.isInitialized) bridgeServer.port to bridgeServer.token else 0 to "" }
+        )
         coordinator = ExecutionCoordinator(
             context = this,
             prootEngine = prootEngine,
@@ -68,8 +78,19 @@ class AtelierApp : Application() {
             workspaceRepo = workspaceRepo,
             coordinator = coordinator,
             crashReporter = crashReporter,
-            dao = database.dao()
+            dao = database.dao(),
+            bridgePortProvider = { if (::bridgeServer.isInitialized) bridgeServer.port else 0 }
         )
+        bridgeServer = AtelierBridgeServer(
+            runtimeManager = runtimeManager,
+            settingsStore = settingsStore,
+            workspaceRepo = workspaceRepo,
+            coordinator = coordinator,
+            crashReporter = crashReporter,
+            inspector = inspector,
+            mediaExport = mediaExport
+        )
+        bridgeServer.start()
 
         thread(isDaemon = true, name = "atelier-startup-tasks") {
             runCatching {

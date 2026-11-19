@@ -40,6 +40,7 @@ class RuntimeManager(private val context: Context) {
     val fakeProcDir: File = File(context.filesDir, "proot_fake_proc").apply { mkdirs() }
     val userSiteDir: File = File(context.filesDir, "user_site").apply { mkdirs() }
     val outputsDir: File = File(context.filesDir, "outputs").apply { mkdirs() }
+    val sdkDir: File = File(context.filesDir, "atelier_sdk").apply { mkdirs() }
     private val readyMarker = File(rootfsDir, ".atelier_ready")
 
     private val _state = MutableStateFlow<RuntimeState>(RuntimeState.Checking)
@@ -201,6 +202,15 @@ class RuntimeManager(private val context: Context) {
             writeOnceAtomic(File(fakeProcDir, "uptime"), "3600.00 7200.00\n")
             writeOnceAtomic(File(fakeProcDir, "loadavg"), "0.15 0.12 0.10 1/128 4096\n")
             writeOnceAtomic(File(fakeProcDir, "vmstat"), "nr_free_pages 262144\nnr_active_anon 65536\n")
+        }
+    }
+
+    fun deployAtelierSdk() {
+        runCatching {
+            val dest = File(File(sdkDir, "atelier").apply { mkdirs() }, "__init__.py")
+            context.assets.open("atelier_sdk/atelier/__init__.py").use { input ->
+                dest.writeBytes(input.readBytes())
+            }
         }
     }
 

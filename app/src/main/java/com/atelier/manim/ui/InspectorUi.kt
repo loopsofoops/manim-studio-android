@@ -66,10 +66,10 @@ fun StudioInspectorSheet(
     var previewText by remember { mutableStateOf("Loading live diagnostics...") }
     var selectedCrash by remember { mutableStateOf<CrashReportEntry?>(null) }
 
-    val tabs = listOf("Full Snapshot", "File Tree", "Active + Errors", "Status & Settings", "Crashes (${crashReports.size})")
+    val tabs = listOf("Full Snapshot", "File Tree", "Active + Errors", "Status & Settings", "AI SDK Schema", "Crashes (${crashReports.size})")
 
     LaunchedEffect(tab, crashReports.size) {
-        if (tab < 4) {
+        if (tab < 5) {
             selectedCrash = null
             previewText = loadSectionText(tab)
         }
@@ -97,7 +97,7 @@ fun StudioInspectorSheet(
                 tabs.forEachIndexed { idx, label -> PillChip(label, tab == idx) { tab = idx } }
             }
 
-            if (tab == 4) {
+            if (tab == 5) {
                 if (selectedCrash != null) {
                     val cr = selectedCrash!!
                     val body = remember(cr.id) { readCrashReport(cr) }

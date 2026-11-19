@@ -227,6 +227,102 @@ class WorkspaceRepository(
 ) {
     val workspaceDir: File = File(appContext.filesDir, "workspace").apply { mkdirs() }
     private val writeMutex = Mutex()
+    private val txLock = Any()
+    private var activeTxId: String = ""
+    private val transactions = linkedMapOf<String, MutableMap<String, String?>>()
+
+    fun beginTransaction(label: String = "AI Controller"): String {
+        synchronized(txLock) {
+            val id = "tx_${System.currentTimeMillis()}"
+            activeTxId = id
+            transactions[id] = linkedMapOf()
+            if (transactions.size > 10) transactions.remove(transactions.keys.first())
+            return id
+        }
+    }
+
+    private fun recordPreMutation(relPath: String, existed: Boolean, oldContent: String?) {
+        synchronized(txLock) {
+            val map = transactions[activeTxId] ?: return
+            if (relPath !in map) map[relPath] = if (existed) oldContent else null
+        }
+    }
+
+    suspend fun rollbackTransaction(txId: String = ""): Int = withContext(Dispatchers.IO) {
+        val snapshot: Map<String, String?> = synchronized(txLock) {
+            val targetId = txId.ifBlank { activeTxId }
+            val m = transactions.remove(targetId) ?: return@withContext 0
+            if (activeTxId == targetId) activeTxId = ""
+            m.toMap()
+        }
+        var count = 0
+        for ((rel, prevContent) in snapshot) {
+            val ent = dao.getFileByPath(rel)
+            if (prevContent == null) {
+                if (ent != null) deleteFile(ent) else File(workspaceDir, rel).delete()
+            } else {
+                if (ent != null) saveFile(ent, prevContent, label = "Rollback TX", triggerType = "RESTORE")
+                else createFile(rel, inferLanguageForPath(rel), prevContent)
+            }
+            count++
+        }
+        count
+    }
+
+    suspend fun getAllFiles(): List<ProjectFileEntity> = withContext(Dispatchers.IO) { dao.getAllFiles() }
+    suspend fun getRevisionsSnapshot(fileId: Long): List<FileRevisionEntity> = withContext(Dispatchers.IO) { dao.getRevisionsForFile(fileId) }
+
+    suspend fun findOrSyncFile(rawPath: String): ProjectFileEntity? = withContext(Dispatchers.IO) {
+        val clean = rawPath.trim().removePrefix("/workspace/").trimStart('/')
+        dao.getFileByPath(clean)?.let { return@withContext it }
+        syncWorkspaceFromDisk()
+        dao.getFileByPath(clean) ?: dao.getAllFiles().firstOrNull { it.name == clean }
+    }
+
+    suspend fun writeByPath(rawPath: String, content: String, label: String = "AI Controller", language: String = "AUTO"): ProjectFileEntity = withContext(Dispatchers.IO) {
+        val clean = rawPath.trim().removePrefix("/workspace/").trimStart('/')
+        val existing = findOrSyncFile(clean)
+        if (existing != null) {
+            val prev = runCatching { readFile(existing) }.getOrNull()
+            recordPreMutation(existing.relativePath, true, prev)
+            saveFile(existing, content, label = label, triggerType = "AI_CTRL")
+            dao.getFileById(existing.id) ?: existing
+        } else {
+            val lang = if (language == "AUTO") inferLanguageForPath(clean) else language
+            val created = createFile(clean, lang, content)
+            recordPreMutation(created.relativePath, false, null)
+            created
+        }
+    }
+
+    suspend fun patchFile(rawPath: String, oldStr: String, newStr: String, count: Int = 1, label: String = "AI Patch"): Pair<ProjectFileEntity, Int> = withContext(Dispatchers.IO) {
+        val ent = findOrSyncFile(rawPath) ?: error("File not found: $rawPath")
+        val src = readFile(ent)
+        if (!src.contains(oldStr)) error("Target snippet not found in ${ent.relativePath}")
+        recordPreMutation(ent.relativePath, true, src)
+        var replaced = 0
+        val updated = if (count <= 0) {
+            var cur = src
+            while (cur.contains(oldStr)) { cur = cur.replaceFirst(oldStr, newStr); replaced++ }
+            cur
+        } else {
+            var cur = src
+            repeat(count) {
+                if (cur.contains(oldStr)) { cur = cur.replaceFirst(oldStr, newStr); replaced++ }
+            }
+            cur
+        }
+        saveFile(ent, updated, label = label, triggerType = "AI_CTRL")
+        (dao.getFileById(ent.id) ?: ent) to replaced
+    }
+
+    suspend fun createFolder(rawPath: String): File = withContext(Dispatchers.IO) {
+        val clean = rawPath.trim().removePrefix("/workspace/").trim('/')
+            .split('/').filter { it.isNotBlank() && it != "." && it != ".." }
+            .joinToString("/") { it.replace(Regex("[:*?"<>|\s]+"), "_") }
+        if (clean.isEmpty()) error("Invalid folder path")
+        File(workspaceDir, clean).apply { mkdirs() }
+    }
 
     fun observeFiles(): Flow<List<ProjectFileEntity>> = dao.observeFiles()
 
@@ -384,6 +480,8 @@ class WorkspaceRepository(
         }
 
     suspend fun deleteFile(entity: ProjectFileEntity) = withContext(Dispatchers.IO) {
+        val prev = runCatching { readFile(entity) }.getOrNull()
+        recordPreMutation(entity.relativePath, true, prev)
         resolveDiskFile(entity).delete()
         dao.deleteFileById(entity.id)
     }

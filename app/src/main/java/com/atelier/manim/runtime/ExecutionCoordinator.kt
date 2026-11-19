@@ -59,6 +59,15 @@ class ExecutionCoordinator(
     private var activeJob: Job? = null
     @Volatile private var activeProcess: Process? = null
     @Volatile private var activeStdin: BufferedWriter? = null
+    @Volatile private var bridgeSubProcess: Process? = null
+
+    private val _controllerSteps = MutableStateFlow<List<ControllerStep>>(emptyList())
+    val controllerSteps: StateFlow<List<ControllerStep>> = _controllerSteps.asStateFlow()
+
+    private val _lastTransactionId = MutableStateFlow("")
+    val lastTransactionId: StateFlow<String> = _lastTransactionId.asStateFlow()
+
+    private val stepIdGen = AtomicLong(1L)
 
     private val animProgressRegex = Regex("""Animation\s+(\d+)\s*:.*?(\d{1,3})%""")
     private val pctRegex = Regex("""(\d{1,3})%""")
@@ -78,9 +87,11 @@ class ExecutionCoordinator(
 
     fun cancelActiveTask() {
         runIdGen.incrementAndGet()
+        runCatching { bridgeSubProcess?.destroyForcibly() }
         runCatching { activeProcess?.destroyForcibly() }
         activeJob?.cancel()
         activeJob = null
+        bridgeSubProcess = null
         activeProcess = null
         activeStdin = null
         RenderForegroundService.stop(context)
@@ -511,6 +522,197 @@ class ExecutionCoordinator(
         }
     }
 
+    fun runControllerScript(code: String) {
+        val txId = workspaceRepo.beginTransaction("AI Controller")
+        _lastTransactionId.value = txId
+        _controllerSteps.value = emptyList()
+        launchTask(modeLabel = "AI Controller", initialStage = "Executing controller script...", isController = true) { startMs ->
+            val scriptHost = File(runtimeManager.outputsDir, ".atelier_ctrl.py")
+            scriptHost.writeText(code, Charsets.UTF_8)
+            crashReporter.lastCommand = "python3 /outputs/.atelier_ctrl.py"
+            RenderForegroundService.update(context, "AI Controller", "Running automation script...", -1f)
+            appendLog("$ python3 /outputs/.atelier_ctrl.py")
+
+            val (exitCode, fullLog) = runStreamingProcess(
+                guestCommand = listOf("/opt/atelier-venv/bin/python3", "-u", "/outputs/.atelier_ctrl.py"),
+                extraEnv = mapOf("ATELIER_CONTROLLER_MODE" to "1")
+            ) { line ->
+                if (line.startsWith("__ATELIER_CTRL_STEP__:")) {
+                    runCatching {
+                        val o = JSONObject(line.removePrefix("__ATELIER_CTRL_STEP__:"))
+                        val step = ControllerStep(
+                            id = stepIdGen.getAndIncrement(),
+                            method = o.optString("method"),
+                            status = o.optString("status", "ok"),
+                            detail = o.optString("detail", ""),
+                            timestampMs = System.currentTimeMillis()
+                        )
+                        _controllerSteps.update { cur ->
+                            if (step.status != "running" && cur.isNotEmpty() && cur.last().method == step.method && cur.last().status == "running") {
+                                (cur.dropLast(1) + step).takeLast(120)
+                            } else {
+                                (cur + step).takeLast(120)
+                            }
+                        }
+                        _state.update { it.copy(stageLabel = "${step.method} (${step.status})") }
+                    }
+                }
+            }
+
+            val elapsed = System.currentTimeMillis() - startMs
+            val diagnostics = DiagnosticParser.parse(fullLog, ".atelier_ctrl.py")
+            val failEntry = if (exitCode != 0) {
+                crashReporter.recordExecutionFailure("AI Controller", ".atelier_ctrl.py", "controller script", exitCode, elapsed, diagnostics, fullLog)
+            } else null
+
+            _state.update {
+                it.copy(
+                    isRunning = false,
+                    stageLabel = if (exitCode == 0) "Controller done (${elapsed}ms)" else "Controller failed ($exitCode)",
+                    progress = -1f,
+                    diagnostics = diagnostics,
+                    lastExitCode = exitCode,
+                    elapsedMs = elapsed,
+                    bannerMessage = if (exitCode == 0) "Controller finished (${elapsed}ms)" else (diagnostics.firstOrNull()?.message ?: "Controller exited $exitCode"),
+                    bannerIsError = exitCode != 0,
+                    lastErrorSummary = if (exitCode != 0) (diagnostics.firstOrNull()?.message ?: decodeExitSignal(exitCode)) else "",
+                    lastCrashReportPath = failEntry?.filePath ?: ""
+                )
+            }
+        }
+    }
+
+    suspend fun runManimBlockingForBridge(
+        file: ProjectFileEntity,
+        code: String,
+        sceneName: String,
+        preset: ManimPreset,
+        customWidth: Int,
+        customHeight: Int,
+        customFps: Int,
+        outputFormat: OutputFormat,
+        renderMode: ManimRenderMode,
+        animRangeStart: Int,
+        animRangeEnd: Int,
+        disableCaching: Boolean,
+        autoSaveToStorage: Boolean
+    ): JSONObject {
+        val startMs = System.currentTimeMillis()
+        val savedRev = workspaceRepo.saveFile(file, code, label = "AI Pre-render", triggerType = "AI_CTRL")
+        val effFormat = if (renderMode == ManimRenderMode.STILL) OutputFormat.PNG_LAST else outputFormat
+        val w = when { renderMode == ManimRenderMode.DRAFT -> 854; preset == ManimPreset.CUSTOM -> max(160, customWidth); else -> preset.width }
+        val h = when { renderMode == ManimRenderMode.DRAFT -> 480; preset == ManimPreset.CUSTOM -> max(160, customHeight); else -> preset.height }
+        val fps = when { renderMode == ManimRenderMode.DRAFT -> 15; preset == ManimPreset.CUSTOM -> max(1, min(120, customFps)); else -> preset.fps }
+        val mediaSubdir = File(runtimeManager.outputsDir, "manim").apply { mkdirs() }
+        val outStem = "${sceneName}_${System.currentTimeMillis()}"
+        val outFileName = "$outStem.${effFormat.ext}"
+        val args = mutableListOf("/opt/atelier-venv/bin/manim", "render", "--media_dir", "/outputs/manim", "-r", "$w,$h", "--fps", "$fps", "-o", outFileName)
+        when (effFormat) {
+            OutputFormat.MP4 -> args.addAll(listOf("--format", "mp4"))
+            OutputFormat.GIF -> args.addAll(listOf("--format", "gif"))
+            OutputFormat.PNG_LAST -> args.add("-s")
+            OutputFormat.WEBM_ALPHA -> args.addAll(listOf("--format", "webm", "-t"))
+        }
+        if (renderMode == ManimRenderMode.RANGE) args.addAll(listOf("-n", "$animRangeStart,$animRangeEnd"))
+        if (disableCaching) args.add("--disable_caching")
+        args.add("/workspace/${file.relativePath}")
+        if (sceneName.isNotBlank()) args.add(sceneName)
+
+        appendLog("[Bridge] $ manim render -r $w,$h --fps $fps ${file.relativePath} $sceneName")
+        val (exitCode, fullLog) = runBridgeSubProcess(args)
+        val elapsed = System.currentTimeMillis() - startMs
+        val diagnostics = DiagnosticParser.parse(fullLog, file.name)
+        val diagJson = org.json.JSONArray().apply { diagnostics.forEach { put("L${it.line}: ${it.message}") } }
+
+        if (exitCode != 0) {
+            crashReporter.recordExecutionFailure("Bridge Manim · $sceneName", file.relativePath, args.joinToString(" "), exitCode, elapsed, diagnostics, fullLog)
+            return JSONObject().put("exitCode", exitCode).put("elapsedMs", elapsed).put("diagnostics", diagJson).put("logTail", fullLog.takeLast(4000))
+        }
+        val produced = locateLatestOutput(mediaSubdir, outStem, effFormat.ext)
+            ?: return JSONObject().put("exitCode", -1).put("elapsedMs", elapsed).put("error", "No output file found")
+        val kind = if (effFormat == OutputFormat.MP4 || effFormat == OutputFormat.WEBM_ALPHA) OutputKind.VIDEO else OutputKind.IMAGE
+        val telemetry = if (kind == OutputKind.VIDEO) probeVideo(produced) else VideoTelemetry(w, h, fps.toDouble(), sizeBytes = produced.length())
+        val snap = blobStore.snapshotArtifact(produced, "${file.name}_$sceneName")
+        val exp = if (autoSaveToStorage) {
+            if (kind == OutputKind.VIDEO) mediaExport.saveVideoToStorage(produced, "${file.name.substringBeforeLast('.')}_$sceneName")
+            else mediaExport.saveImageToStorage(produced, "${file.name.substringBeforeLast('.')}_$sceneName")
+        } else null
+        val rev = workspaceRepo.saveFile(file, code, label = "AI Render $sceneName", triggerType = "RENDER_OK", outputPath = snap, outputType = kind.name, outputMeta = telemetry.summaryBadge())
+        dao.insertRenderHistory(RenderHistoryEntity(fileId = file.id, revisionId = rev?.id ?: (savedRev?.id ?: 0L), sceneName = sceneName, preset = "${w}x${h}@${fps}", outputPath = snap, outputType = kind.name, exportedUri = exp?.uriString ?: "", width = telemetry.width, height = telemetry.height, fps = telemetry.fps, durationMs = telemetry.durationMs, fileSizeBytes = produced.length(), createdAt = System.currentTimeMillis()))
+        setPreviewArtifact(OutputArtifact(snap, kind, sceneName, telemetry, exp?.displayLocation ?: "", rev?.id ?: 0L, System.currentTimeMillis()))
+        return JSONObject().apply {
+            put("exitCode", 0); put("elapsedMs", elapsed); put("outputPath", snap)
+            put("exportedLocation", exp?.displayLocation ?: ""); put("telemetry", telemetry.summaryBadge())
+            put("diagnostics", diagJson); put("summary", "$sceneName · ${telemetry.summaryBadge()}")
+        }
+    }
+
+    suspend fun compileLatexBlockingForBridge(file: ProjectFileEntity, code: String, autoSavePdf: Boolean): JSONObject {
+        val startMs = System.currentTimeMillis()
+        workspaceRepo.saveFile(file, code, label = "AI TeX", triggerType = "AI_CTRL")
+        val texOutDir = File(runtimeManager.outputsDir, "tex").apply { mkdirs() }
+        val cmd = listOf("/bin/bash", "-lc", "pdflatex -interaction=nonstopmode -file-line-error -output-directory=/outputs/tex "/workspace/${file.relativePath}" && pdflatex -interaction=nonstopmode -file-line-error -output-directory=/outputs/tex "/workspace/${file.relativePath}"")
+        val (exitCode, fullLog) = runBridgeSubProcess(cmd)
+        val elapsed = System.currentTimeMillis() - startMs
+        val pdf = File(texOutDir, "${file.name.substringBeforeLast('.')}.pdf")
+        if (!pdf.exists() || pdf.length() == 0L) {
+            return JSONObject().put("exitCode", exitCode).put("elapsedMs", elapsed).put("logTail", fullLog.takeLast(4000))
+        }
+        val snap = blobStore.snapshotArtifact(pdf, "${file.name}_tex")
+        val exp = if (autoSavePdf) mediaExport.saveDocumentToStorage(pdf, file.name.substringBeforeLast('.'), "application/pdf") else null
+        setPreviewArtifact(OutputArtifact(snap, OutputKind.PDF, pdf.name, VideoTelemetry(sizeBytes = pdf.length()), exp?.displayLocation ?: "", 0L, System.currentTimeMillis()))
+        return JSONObject().put("exitCode", 0).put("elapsedMs", elapsed).put("outputPath", snap).put("exportedLocation", exp?.displayLocation ?: "")
+    }
+
+    suspend fun runPythonBlockingForBridge(file: ProjectFileEntity, code: String): JSONObject {
+        val startMs = System.currentTimeMillis()
+        workspaceRepo.saveFile(file, code, label = "AI Run Python", triggerType = "AI_CTRL")
+        val (exitCode, fullLog) = runBridgeSubProcess(listOf("/opt/atelier-venv/bin/python3", "-u", "/usr/local/bin/atelier-run.py", "/workspace/${file.relativePath}"))
+        return JSONObject().put("exitCode", exitCode).put("elapsedMs", System.currentTimeMillis() - startMs).put("output", fullLog.takeLast(8000))
+    }
+
+    suspend fun compilePythonBlockingForBridge(file: ProjectFileEntity, code: String, nativeCython: Boolean): JSONObject {
+        val startMs = System.currentTimeMillis()
+        workspaceRepo.saveFile(file, code, label = "AI Compile", triggerType = "AI_CTRL")
+        val args = mutableListOf("/opt/atelier-venv/bin/python3", "/usr/local/bin/atelier-compile.py")
+        if (nativeCython) args.add("--native")
+        args.add("/workspace/${file.relativePath}")
+        val (exitCode, fullLog) = runBridgeSubProcess(args)
+        return JSONObject().put("exitCode", exitCode).put("elapsedMs", System.currentTimeMillis() - startMs).put("report", fullLog.takeLast(8000))
+    }
+
+    fun runPipBlockingForBridge(action: String, pkgSpec: String): JSONObject {
+        val cmd = if (action == "install") {
+            listOf("/opt/atelier-venv/bin/pip", "install", "--target", "/user-site", "--upgrade", "--prefer-binary") + pkgSpec.split(Regex("\s+")).filter { it.isNotBlank() }
+        } else listOf("/opt/atelier-venv/bin/pip", "list")
+        val (exitCode, out) = runBridgeSubProcess(cmd)
+        return JSONObject().put("exitCode", exitCode).put("output", out.takeLast(8000))
+    }
+
+    private fun runBridgeSubProcess(guestCommand: List<String>): Pair<Int, String> {
+        val (pb, tmpDir) = prootEngine.createProcessBuilder(guestCommand, mergeErrorStream = true)
+        val full = StringBuilder()
+        var proc: Process? = null
+        return try {
+            proc = pb.start()
+            bridgeSubProcess = proc
+            proc.inputStream.bufferedReader().use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    full.appendLine(line)
+                    if (!line.startsWith("__ATELIER_ARTIFACT__:")) appendLog(line)
+                }
+            }
+            val exit = proc.waitFor()
+            flushLogNow()
+            exit to full.toString()
+        } finally {
+            runCatching { proc?.destroyForcibly() }
+            runCatching { tmpDir.deleteRecursively() }
+            if (bridgeSubProcess === proc) bridgeSubProcess = null
+        }
+    }
+
     fun runShellCommand(command: String) {
         val clean = command.trim()
         if (clean.isEmpty()) return
@@ -533,6 +735,7 @@ class ExecutionCoordinator(
     private fun launchTask(
         modeLabel: String,
         initialStage: String,
+        isController: Boolean = false,
         block: suspend (startMs: Long) -> Unit
     ) {
         if (runtimeManager.state.value !is RuntimeState.Ready) {
@@ -558,7 +761,8 @@ class ExecutionCoordinator(
                         it.copy(
                             isRunning = true, modeLabel = modeLabel, stageLabel = initialStage,
                             progress = -1f, diagnostics = emptyList(), lastExitCode = null,
-                            bannerMessage = "", bannerIsError = false, lastErrorSummary = ""
+                            bannerMessage = "", bannerIsError = false, lastErrorSummary = "",
+                            isControllerRun = isController
                         )
                     }
                     try {
@@ -596,13 +800,14 @@ class ExecutionCoordinator(
 
     private fun runStreamingProcess(
         guestCommand: List<String>,
+        extraEnv: Map<String, String> = emptyMap(),
         onLine: (String) -> Unit = {}
     ): Pair<Int, String> {
         var attempt = 0
         while (true) {
             attempt++
             val t0 = System.currentTimeMillis()
-            val (exit, output) = runStreamingOnce(guestCommand, onLine)
+            val (exit, output) = runStreamingOnce(guestCommand, extraEnv, onLine)
             val dt = System.currentTimeMillis() - t0
             val isTransientColdSignal = attempt == 1 &&
                 exit in listOf(134, 135, 139) &&
@@ -620,9 +825,10 @@ class ExecutionCoordinator(
 
     private fun runStreamingOnce(
         guestCommand: List<String>,
+        extraEnv: Map<String, String>,
         onLine: (String) -> Unit
     ): Pair<Int, String> {
-        val (pb, tmpDir) = prootEngine.createProcessBuilder(guestCommand, mergeErrorStream = true)
+        val (pb, tmpDir) = prootEngine.createProcessBuilder(guestCommand, mergeErrorStream = true, extraEnv = extraEnv)
         val full = StringBuilder()
         var proc: Process? = null
         var stdinWriter: BufferedWriter? = null
@@ -635,7 +841,7 @@ class ExecutionCoordinator(
                 while (true) {
                     val line = reader.readLine() ?: break
                     full.appendLine(line)
-                    if (!line.startsWith("__ATELIER_ARTIFACT__:")) {
+                    if (!line.startsWith("__ATELIER_ARTIFACT__:") && !line.startsWith("__ATELIER_CTRL_STEP__:")) {
                         appendLog(line)
                     }
                     onLine(line)

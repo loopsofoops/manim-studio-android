@@ -235,4 +235,11 @@ object AtelierIcons {
             moveTo(8f, 16f); lineTo(12f, 16f)
         }
     }
+
+    val Paste by lazy {
+        icon("Paste") {
+            moveTo(9f, 4f); lineTo(15f, 4f); lineTo(15f, 7f); lineTo(9f, 7f); close()
+            moveTo(9f, 5.5f); lineTo(6f, 5.5f); lineTo(6f, 20f); lineTo(18f, 20f); lineTo(18f, 5.5f); lineTo(15f, 5.5f)
+        }
+    }
 }

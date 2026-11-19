@@ -14,7 +14,8 @@ import java.util.UUID
 class ProotEngine(
     private val context: Context,
     private val runtimeManager: RuntimeManager,
-    private val threadsProvider: () -> Int = { 2 }
+    private val threadsProvider: () -> Int = { 2 },
+    private val bridgeInfoProvider: () -> Pair<Int, String> = { 0 to "" }
 ) {
     private val workspaceDir: File
         get() = File(context.filesDir, "workspace").apply { mkdirs() }
@@ -23,7 +24,8 @@ class ProotEngine(
         guestCommand: List<String>,
         workDir: String = "/workspace",
         forceNoSeccomp: Boolean? = null,
-        mergeErrorStream: Boolean = true
+        mergeErrorStream: Boolean = true,
+        extraEnv: Map<String, String> = emptyMap()
     ): Pair<ProcessBuilder, File> {
         runtimeManager.ensureFakeProcFiles()
         runtimeManager.ensureRootfsNetworking()
@@ -50,6 +52,7 @@ class ProotEngine(
             "-b", "${workspaceDir.absolutePath}:/workspace",
             "-b", "${runtimeManager.userSiteDir.absolutePath}:/user-site",
             "-b", "${runtimeManager.outputsDir.absolutePath}:/outputs",
+            "-b", "${runtimeManager.sdkDir.absolutePath}:/atelier-sdk",
             "-w", workDir,
             "/usr/bin/env", "-i",
             "HOME=/root",
@@ -61,13 +64,19 @@ class ProotEngine(
             "MPLBACKEND=Agg",
             "PYTHONUNBUFFERED=1",
             "VIRTUAL_ENV=/opt/atelier-venv",
-            "PYTHONPATH=/user-site:/workspace",
+            "PYTHONPATH=/atelier-sdk:/user-site:/workspace",
             "PIP_TARGET=/user-site",
             "OMP_NUM_THREADS=${threadsProvider()}",
             "OPENBLAS_NUM_THREADS=${threadsProvider()}",
             "MKL_NUM_THREADS=${threadsProvider()}",
             "PATH=/opt/atelier-venv/bin:/user-site/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
+        val (bPort, bToken) = bridgeInfoProvider()
+        if (bPort > 0 && bToken.isNotBlank()) {
+            cmd.add("ATELIER_BRIDGE_PORT=$bPort")
+            cmd.add("ATELIER_BRIDGE_TOKEN=$bToken")
+        }
+        extraEnv.forEach { (k, v) -> cmd.add("$k=$v") }
         cmd.addAll(guestCommand)
 
         val pb = ProcessBuilder(cmd)

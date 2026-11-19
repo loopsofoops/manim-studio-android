@@ -185,6 +185,26 @@ enum class ComputeProfile(val label: String, val shortLabel: String, val threads
     MAX_6T("Max (6 Threads)", "6T", 6)
 }
 
+enum class StudioMode(val label: String) {
+    CODE("Code"),
+    CONTROL("Control")
+}
+
+data class ControllerStep(
+    val id: Long,
+    val method: String,
+    val status: String,
+    val detail: String,
+    val timestampMs: Long
+)
+
+data class ControllerMacro(
+    val id: String,
+    val name: String,
+    val description: String,
+    val code: String
+)
+
 data class CrashReportEntry(
     val id: String,
     val fileName: String,
@@ -225,7 +245,8 @@ data class ExecutionState(
     val bannerMessage: String = "",
     val bannerIsError: Boolean = false,
     val lastErrorSummary: String = "",
-    val lastCrashReportPath: String = ""
+    val lastCrashReportPath: String = "",
+    val isControllerRun: Boolean = false
 )
 
 data class ReplVar(val name: String, val type: String, val valueRepr: String)

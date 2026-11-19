@@ -189,6 +189,36 @@ class CrashReporter(
 
     fun dismissPendingAlert() { _pendingCrashAlert.value = null }
 
+    fun postCustomNotification(title: String, message: String, copyText: String = "") {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (nm.getNotificationChannel(CHANNEL_CRASH) == null) {
+                nm.createNotificationChannel(NotificationChannel(CHANNEL_CRASH, "Atelier Crash & Error Alerts", NotificationManager.IMPORTANCE_HIGH))
+            }
+        }
+        val openIntent = PendingIntent.getActivity(
+            context, 4203, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val b = NotificationCompat.Builder(context, CHANNEL_CRASH)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle(title).setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setAutoCancel(true).setContentIntent(openIntent)
+        if (copyText.isNotBlank()) {
+            val copyIntent = PendingIntent.getBroadcast(
+                context, (System.currentTimeMillis() and 0xFFFF).toInt(),
+                Intent(context, CrashNotificationReceiver::class.java).apply {
+                    action = CrashNotificationReceiver.ACTION_COPY_ERROR
+                    putExtra(CrashNotificationReceiver.EXTRA_FALLBACK_TEXT, copyText.take(4000))
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            b.addAction(0, "Copy", copyIntent)
+        }
+        runCatching { (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(4198, b.build()) }
+    }
+
     fun clearAllReports() {
         reportsDir.listFiles()?.forEach { it.delete() }
         _pendingCrashAlert.value = null
