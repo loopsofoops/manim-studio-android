@@ -13,7 +13,8 @@ import java.util.UUID
 
 class ProotEngine(
     private val context: Context,
-    private val runtimeManager: RuntimeManager
+    private val runtimeManager: RuntimeManager,
+    private val threadsProvider: () -> Int = { 2 }
 ) {
     private val workspaceDir: File
         get() = File(context.filesDir, "workspace").apply { mkdirs() }
@@ -62,10 +63,10 @@ class ProotEngine(
             "VIRTUAL_ENV=/opt/atelier-venv",
             "PYTHONPATH=/user-site:/workspace",
             "PIP_TARGET=/user-site",
-            "OMP_NUM_THREADS=2",
-            "OPENBLAS_NUM_THREADS=2",
-            "MKL_NUM_THREADS=2",
-            "PATH=/opt/atelier-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "OMP_NUM_THREADS=${threadsProvider()}",
+            "OPENBLAS_NUM_THREADS=${threadsProvider()}",
+            "MKL_NUM_THREADS=${threadsProvider()}",
+            "PATH=/opt/atelier-venv/bin:/user-site/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
         cmd.addAll(guestCommand)
 

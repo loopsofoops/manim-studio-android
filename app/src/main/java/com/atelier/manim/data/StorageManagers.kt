@@ -1,8 +1,11 @@
 package com.atelier.manim.data
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
@@ -12,6 +15,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.math.max
 import kotlin.math.min
 
@@ -318,6 +323,67 @@ class MediaExportManager(private val context: Context) {
             activityContext.startActivity(chooser)
         }
     }
+
+    fun saveTextDocumentToStorage(content: String, baseTitle: String, subFolder: String = "Logs"): ExportResult {
+        val fileName = "${sanitizeTitle(baseTitle)}.txt"
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val rel = "${Environment.DIRECTORY_DOCUMENTS}/Atelier/$subFolder"
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, rel)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
+                    ?: error("MediaStore failed to create text file.")
+                try {
+                    resolver.openOutputStream(uri)?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+                        ?: error("Cannot open text output stream.")
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    ExportResult(true, "Documents/Atelier/$subFolder/$fileName", uri.toString())
+                } catch (t: Throwable) {
+                    resolver.delete(uri, null, null)
+                    throw t
+                }
+            } else {
+                val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
+                val outDir = File(File(baseDir, "Atelier"), subFolder).apply { mkdirs() }
+                val dest = File(outDir, fileName)
+                dest.writeText(content, Charsets.UTF_8)
+                ExportResult(true, dest.absolutePath, dest.toURI().toString())
+            }
+        }.getOrElse { e -> ExportResult(false, "", error = e.message ?: "Failed to save report.") }
+    }
+
+    fun exportWorkspaceZip(workspaceDir: File, destUri: Uri): ExportResult = runCatching {
+        context.contentResolver.openOutputStream(destUri)?.use { out ->
+            ZipOutputStream(out).use { zos ->
+                workspaceDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                    val rel = file.relativeTo(workspaceDir).path
+                    zos.putNextEntry(ZipEntry(rel))
+                    FileInputStream(file).use { it.copyTo(zos, 32768) }
+                    zos.closeEntry()
+                }
+            }
+        } ?: error("Cannot open destination ZIP stream.")
+        ExportResult(true, destUri.toString(), destUri.toString())
+    }.getOrElse { e -> ExportResult(false, "", error = e.message ?: "ZIP export failed.") }
+
+    fun copyToClipboard(label: String, text: String) {
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            cm?.setPrimaryClip(ClipData.newPlainText(label, text))
+        }
+    }
+
+    fun readFromClipboard(): String = runCatching {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() ?: ""
+    }.getOrDefault("")
 
     private fun sanitizeTitle(raw: String): String {
         val cleaned = raw.replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_')

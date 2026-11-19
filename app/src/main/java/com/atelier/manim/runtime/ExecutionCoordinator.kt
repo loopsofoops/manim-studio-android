@@ -14,11 +14,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
 import java.io.BufferedWriter
 import java.io.File
@@ -33,19 +37,28 @@ class ExecutionCoordinator(
     private val workspaceRepo: WorkspaceRepository,
     private val mediaExport: MediaExportManager,
     private val dao: AtelierDao,
-    private val blobStore: HistoryBlobStore
+    private val blobStore: HistoryBlobStore,
+    private val crashReporter: CrashReporter
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val taskMutex = Mutex()
+    private val runIdGen = AtomicLong(0L)
+
     private val _state = MutableStateFlow(ExecutionState())
     val state: StateFlow<ExecutionState> = _state.asStateFlow()
+
+    private val _consoleLog = MutableStateFlow("")
+    val consoleLog: StateFlow<String> = _consoleLog.asStateFlow()
+
+    private val logLock = Any()
+    private val logBuffer = StringBuilder()
+    @Volatile private var lastLogFlushMs = 0L
 
     val replSession = ReplSession(prootEngine)
 
     private var activeJob: Job? = null
-    @Volatile
-    private var activeProcess: Process? = null
-    @Volatile
-    private var activeStdin: BufferedWriter? = null
+    @Volatile private var activeProcess: Process? = null
+    @Volatile private var activeStdin: BufferedWriter? = null
 
     private val animProgressRegex = Regex("""Animation\s+(\d+)\s*:.*?(\d{1,3})%""")
     private val pctRegex = Regex("""(\d{1,3})%""")
@@ -64,18 +77,21 @@ class ExecutionCoordinator(
     }
 
     fun cancelActiveTask() {
+        runIdGen.incrementAndGet()
         runCatching { activeProcess?.destroyForcibly() }
         activeJob?.cancel()
         activeJob = null
         activeProcess = null
         activeStdin = null
         RenderForegroundService.stop(context)
+        flushLogNow()
         _state.update {
             it.copy(
                 isRunning = false,
                 stageLabel = "Cancelled",
                 progress = -1f,
-                bannerMessage = "Execution cancelled."
+                bannerMessage = "Execution cancelled.",
+                bannerIsError = false
             )
         }
     }
@@ -85,11 +101,20 @@ class ExecutionCoordinator(
     }
 
     fun clearBanner() {
-        _state.update { it.copy(bannerMessage = "") }
+        _state.update { it.copy(bannerMessage = "", bannerIsError = false) }
     }
 
     fun clearConsole() {
-        _state.update { it.copy(consoleLog = "", diagnostics = emptyList()) }
+        synchronized(logLock) { logBuffer.clear() }
+        _consoleLog.value = ""
+        _state.update { it.copy(diagnostics = emptyList(), lastErrorSummary = "") }
+    }
+
+    fun getConsoleTail(maxLines: Int = 120): String {
+        val text = synchronized(logLock) { logBuffer.toString() }
+        if (text.isEmpty()) return ""
+        val lines = text.lines()
+        return if (lines.size <= maxLines) text else lines.takeLast(maxLines).joinToString("\n")
     }
 
     fun renderManim(
@@ -101,18 +126,34 @@ class ExecutionCoordinator(
         customHeight: Int,
         customFps: Int,
         outputFormat: OutputFormat,
+        renderMode: ManimRenderMode = ManimRenderMode.FULL,
+        animRangeStart: Int = 0,
+        animRangeEnd: Int = 3,
         disableCaching: Boolean,
         autoSaveToStorage: Boolean
     ) {
         launchTask(modeLabel = "Manim · $sceneName", initialStage = "Preparing scene...") { startMs ->
             val savedRev = workspaceRepo.saveFile(file, code, label = "Pre-render", triggerType = "EDIT")
-            val w = if (preset == ManimPreset.CUSTOM) max(160, customWidth) else preset.width
-            val h = if (preset == ManimPreset.CUSTOM) max(160, customHeight) else preset.height
-            val fps = if (preset == ManimPreset.CUSTOM) max(1, min(120, customFps)) else preset.fps
+            val effFormat = if (renderMode == ManimRenderMode.STILL) OutputFormat.PNG_LAST else outputFormat
+            val w = when {
+                renderMode == ManimRenderMode.DRAFT -> 854
+                preset == ManimPreset.CUSTOM -> max(160, customWidth)
+                else -> preset.width
+            }
+            val h = when {
+                renderMode == ManimRenderMode.DRAFT -> 480
+                preset == ManimPreset.CUSTOM -> max(160, customHeight)
+                else -> preset.height
+            }
+            val fps = when {
+                renderMode == ManimRenderMode.DRAFT -> 15
+                preset == ManimPreset.CUSTOM -> max(1, min(120, customFps))
+                else -> preset.fps
+            }
 
             val mediaSubdir = File(runtimeManager.outputsDir, "manim").apply { mkdirs() }
             val outStem = "${sceneName}_${System.currentTimeMillis()}"
-            val outFileName = "$outStem.${outputFormat.ext}"
+            val outFileName = "$outStem.${effFormat.ext}"
 
             val args = mutableListOf(
                 "/opt/atelier-venv/bin/manim", "render",
@@ -121,15 +162,19 @@ class ExecutionCoordinator(
                 "--fps", "$fps",
                 "-o", outFileName
             )
-            when (outputFormat) {
+            when (effFormat) {
                 OutputFormat.MP4 -> args.addAll(listOf("--format", "mp4"))
                 OutputFormat.GIF -> args.addAll(listOf("--format", "gif"))
                 OutputFormat.PNG_LAST -> args.add("-s")
                 OutputFormat.WEBM_ALPHA -> args.addAll(listOf("--format", "webm", "-t"))
             }
+            if (renderMode == ManimRenderMode.RANGE) {
+                args.addAll(listOf("-n", "$animRangeStart,$animRangeEnd"))
+            }
             if (disableCaching) args.add("--disable_caching")
             args.add("/workspace/${file.relativePath}")
             if (sceneName.isNotBlank()) args.add(sceneName)
+            crashReporter.lastCommand = args.joinToString(" ")
 
             RenderForegroundService.update(context, "Rendering $sceneName", "${w}x${h} · ${fps}fps", -1f)
             appendLog("$ manim render -r $w,$h --fps $fps ${file.relativePath} $sceneName")
@@ -163,36 +208,41 @@ class ExecutionCoordinator(
             val elapsed = System.currentTimeMillis() - startMs
 
             if (exitCode != 0) {
+                val failEntry = crashReporter.recordExecutionFailure(
+                    mode = "Manim · $sceneName", fileName = file.relativePath,
+                    command = args.joinToString(" "), exitCode = exitCode,
+                    elapsedMs = elapsed, diagnostics = diagnostics, logTail = fullLog
+                )
+                val msg = diagnostics.firstOrNull()?.let { "L${it.line}: ${it.message}" } ?: "Render failed (${decodeExitSignal(exitCode)})"
                 _state.update {
                     it.copy(
-                        isRunning = false,
-                        stageLabel = "Render failed (exit $exitCode)",
-                        progress = -1f,
-                        diagnostics = diagnostics,
-                        lastExitCode = exitCode,
-                        elapsedMs = elapsed,
-                        bannerMessage = diagnostics.firstOrNull()?.message ?: "Manim render exited with code $exitCode."
+                        isRunning = false, stageLabel = "Render failed (exit $exitCode)", progress = -1f,
+                        diagnostics = diagnostics, lastExitCode = exitCode, elapsedMs = elapsed,
+                        bannerMessage = msg, bannerIsError = true, lastErrorSummary = msg, lastCrashReportPath = failEntry.filePath
                     )
                 }
                 return@launchTask
             }
 
-            val produced = locateLatestOutput(mediaSubdir, outStem, outputFormat.ext)
+            val produced = locateLatestOutput(mediaSubdir, outStem, effFormat.ext)
             if (produced == null || !produced.exists() || produced.length() == 0L) {
+                val msg = "Manim exited cleanly but no ${effFormat.ext.uppercase()} output was found."
+                val failEntry = crashReporter.recordExecutionFailure(
+                    mode = "Manim · $sceneName", fileName = file.relativePath,
+                    command = args.joinToString(" "), exitCode = -1,
+                    elapsedMs = elapsed, diagnostics = diagnostics, logTail = fullLog
+                )
                 _state.update {
                     it.copy(
-                        isRunning = false,
-                        stageLabel = "No output file produced",
-                        progress = -1f,
-                        lastExitCode = exitCode,
-                        elapsedMs = elapsed,
-                        bannerMessage = "Manim exited cleanly but no ${outputFormat.ext.uppercase()} output was found."
+                        isRunning = false, stageLabel = "No output produced", progress = -1f,
+                        lastExitCode = exitCode, elapsedMs = elapsed,
+                        bannerMessage = msg, bannerIsError = true, lastErrorSummary = msg, lastCrashReportPath = failEntry.filePath
                     )
                 }
                 return@launchTask
             }
 
-            val kind = when (outputFormat) {
+            val kind = when (effFormat) {
                 OutputFormat.MP4, OutputFormat.WEBM_ALPHA -> OutputKind.VIDEO
                 OutputFormat.GIF, OutputFormat.PNG_LAST -> OutputKind.IMAGE
             }
@@ -321,8 +371,11 @@ class ExecutionCoordinator(
                     bannerMessage = if (exitCode == 0) {
                         if (latestImageHost != null) "Executed · Figure captured" else "Finished in ${elapsed}ms"
                     } else {
-                        diagnostics.firstOrNull()?.message ?: "Script exited with code $exitCode"
-                    }
+                        val failEntry = crashReporter.recordExecutionFailure("Python", file.relativePath, "python3 /workspace/${file.relativePath}", exitCode, elapsed, diagnostics, fullLog)
+                        diagnostics.firstOrNull()?.let { "L${it.line}: ${it.message}" } ?: "Python failed (${decodeExitSignal(exitCode)}) · saved ${failEntry.fileName}"
+                    },
+                    bannerIsError = exitCode != 0,
+                    lastErrorSummary = if (exitCode != 0) (diagnostics.firstOrNull()?.message ?: decodeExitSignal(exitCode)) else ""
                 )
             }
         }
@@ -380,15 +433,13 @@ class ExecutionCoordinator(
             val pdfFile = File(texOutDir, pdfName)
 
             if (!pdfFile.exists() || pdfFile.length() == 0L) {
+                val failEntry = crashReporter.recordExecutionFailure("LaTeX", file.relativePath, cmd.last(), exitCode, elapsed, diagnostics, fullLog)
+                val msg = diagnostics.firstOrNull()?.let { "L${it.line}: ${it.message}" } ?: "pdflatex failed (${decodeExitSignal(exitCode)})"
                 _state.update {
                     it.copy(
-                        isRunning = false,
-                        stageLabel = "LaTeX compile failed",
-                        progress = -1f,
-                        diagnostics = diagnostics,
-                        lastExitCode = exitCode,
-                        elapsedMs = elapsed,
-                        bannerMessage = diagnostics.firstOrNull()?.message ?: "pdflatex did not produce a PDF."
+                        isRunning = false, stageLabel = "LaTeX compile failed", progress = -1f,
+                        diagnostics = diagnostics, lastExitCode = exitCode, elapsedMs = elapsed,
+                        bannerMessage = msg, bannerIsError = true, lastErrorSummary = msg, lastCrashReportPath = failEntry.filePath
                     )
                 }
                 return@launchTask
@@ -485,42 +536,60 @@ class ExecutionCoordinator(
         block: suspend (startMs: Long) -> Unit
     ) {
         if (runtimeManager.state.value !is RuntimeState.Ready) {
-            _state.update { it.copy(bannerMessage = "Install the offline runtime first to execute code.") }
+            _state.update { it.copy(bannerMessage = "Install the offline runtime first to execute code.", bannerIsError = true) }
             return
         }
-        cancelActiveTask()
-        activeJob = scope.launch {
-            val startMs = System.currentTimeMillis()
-            _state.update {
-                it.copy(
-                    isRunning = true,
-                    modeLabel = modeLabel,
-                    stageLabel = initialStage,
-                    progress = -1f,
-                    consoleLog = "",
-                    diagnostics = emptyList(),
-                    lastExitCode = null,
-                    bannerMessage = ""
-                )
-            }
-            try {
-                block(startMs)
-            } catch (_: CancellationException) {
-                // Handled by cancelActiveTask
-            } catch (t: Throwable) {
-                appendLog("ERROR: ${t.message}")
-                _state.update {
-                    it.copy(
-                        isRunning = false,
-                        stageLabel = "Failed",
-                        progress = -1f,
-                        bannerMessage = t.message ?: "Execution failed."
-                    )
+        val myRunId = runIdGen.incrementAndGet()
+        scope.launch {
+            taskMutex.withLock {
+                val prev = activeJob
+                if (prev != null && prev.isActive) {
+                    runCatching { activeProcess?.destroyForcibly() }
+                    runCatching { prev.cancelAndJoin() }
                 }
-            } finally {
-                activeProcess = null
-                activeStdin = null
-                RenderForegroundService.stop(context)
+                if (runIdGen.get() != myRunId) return@withLock
+
+                activeJob = scope.launch {
+                    val startMs = System.currentTimeMillis()
+                    crashReporter.activeMode = modeLabel
+                    synchronized(logLock) { logBuffer.clear() }
+                    _consoleLog.value = ""
+                    _state.update {
+                        it.copy(
+                            isRunning = true, modeLabel = modeLabel, stageLabel = initialStage,
+                            progress = -1f, diagnostics = emptyList(), lastExitCode = null,
+                            bannerMessage = "", bannerIsError = false, lastErrorSummary = ""
+                        )
+                    }
+                    try {
+                        block(startMs)
+                    } catch (_: CancellationException) {
+                        // Cancelled cleanly
+                    } catch (t: Throwable) {
+                        appendLog("ERROR: ${t.message}")
+                        val entry = crashReporter.recordExecutionFailure(
+                            mode = modeLabel, fileName = crashReporter.activeFilePath,
+                            command = crashReporter.lastCommand, exitCode = -1,
+                            elapsedMs = System.currentTimeMillis() - startMs,
+                            diagnostics = emptyList(), logTail = "${t.stackTraceToString()}\n${getConsoleTail(80)}"
+                        )
+                        _state.update {
+                            it.copy(
+                                isRunning = false, stageLabel = "Failed", progress = -1f,
+                                bannerMessage = t.message ?: "Execution failed.", bannerIsError = true,
+                                lastErrorSummary = t.message ?: "Execution failed.", lastCrashReportPath = entry.filePath
+                            )
+                        }
+                    } finally {
+                        flushLogNow()
+                        if (runIdGen.get() == myRunId) {
+                            activeProcess = null
+                            activeStdin = null
+                            RenderForegroundService.stop(context)
+                            crashReporter.activeMode = ""
+                        }
+                    }
+                }
             }
         }
     }
@@ -529,12 +598,39 @@ class ExecutionCoordinator(
         guestCommand: List<String>,
         onLine: (String) -> Unit = {}
     ): Pair<Int, String> {
+        var attempt = 0
+        while (true) {
+            attempt++
+            val t0 = System.currentTimeMillis()
+            val (exit, output) = runStreamingOnce(guestCommand, onLine)
+            val dt = System.currentTimeMillis() - t0
+            val isTransientColdSignal = attempt == 1 &&
+                exit in listOf(134, 135, 139) &&
+                dt < 3000L &&
+                !output.contains("Traceback") &&
+                output.length < 400
+            if (isTransientColdSignal) {
+                appendLog("[Atelier] Transient PRoot startup signal ($exit) detected; retrying cleanly...")
+                Thread.sleep(220L)
+                continue
+            }
+            return exit to output
+        }
+    }
+
+    private fun runStreamingOnce(
+        guestCommand: List<String>,
+        onLine: (String) -> Unit
+    ): Pair<Int, String> {
         val (pb, tmpDir) = prootEngine.createProcessBuilder(guestCommand, mergeErrorStream = true)
         val full = StringBuilder()
+        var proc: Process? = null
+        var stdinWriter: BufferedWriter? = null
         return try {
-            val proc = pb.start()
+            proc = pb.start()
             activeProcess = proc
-            activeStdin = BufferedWriter(OutputStreamWriter(proc.outputStream, Charsets.UTF_8))
+            stdinWriter = BufferedWriter(OutputStreamWriter(proc.outputStream, Charsets.UTF_8))
+            activeStdin = stdinWriter
             proc.inputStream.bufferedReader().use { reader ->
                 while (true) {
                     val line = reader.readLine() ?: break
@@ -546,22 +642,40 @@ class ExecutionCoordinator(
                 }
             }
             val exit = proc.waitFor()
+            flushLogNow()
             exit to full.toString()
         } finally {
-            runCatching { activeStdin?.close() }
-            runCatching { activeProcess?.destroyForcibly() }
+            runCatching { stdinWriter?.close() }
+            runCatching { proc?.destroyForcibly() }
             runCatching { tmpDir.deleteRecursively() }
-            activeProcess = null
-            activeStdin = null
+            if (activeProcess === proc) activeProcess = null
+            if (activeStdin === stdinWriter) activeStdin = null
         }
     }
 
     private fun appendLog(line: String) {
-        _state.update { cur ->
-            val combined = if (cur.consoleLog.isEmpty()) line else "${cur.consoleLog}\n$line"
-            val trimmed = if (combined.length > 48_000) combined.takeLast(44_000) else combined
-            cur.copy(consoleLog = trimmed)
+        val now = System.currentTimeMillis()
+        var snapshot: String? = null
+        synchronized(logLock) {
+            if (logBuffer.isNotEmpty()) logBuffer.append('\n')
+            logBuffer.append(line)
+            if (logBuffer.length > 52_000) {
+                logBuffer.delete(0, logBuffer.length - 46_000)
+            }
+            if (now - lastLogFlushMs >= 120L) {
+                lastLogFlushMs = now
+                snapshot = logBuffer.toString()
+            }
         }
+        snapshot?.let { _consoleLog.value = it }
+    }
+
+    private fun flushLogNow() {
+        val snap = synchronized(logLock) {
+            lastLogFlushMs = System.currentTimeMillis()
+            logBuffer.toString()
+        }
+        _consoleLog.value = snap
     }
 
     private fun locateLatestOutput(rootDir: File, stem: String, ext: String): File? {

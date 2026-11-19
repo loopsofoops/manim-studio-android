@@ -180,24 +180,45 @@ class RuntimeManager(private val context: Context) {
         }
     }
 
+    private val fakeProcLock = Any()
+
     fun ensureFakeProcFiles() {
-        fakeProcDir.mkdirs()
-        val cores = max(1, Runtime.getRuntime().availableProcessors())
-        val statText = buildString {
-            appendLine("cpu  1000 0 1000 100000 0 0 0 0 0 0")
-            for (i in 0 until cores) appendLine("cpu$i 250 0 250 25000 0 0 0 0 0 0")
-            appendLine("intr 0")
-            appendLine("ctxt 10000")
-            appendLine("btime 1700000000")
-            appendLine("processes 100")
-            appendLine("procs_running 1")
-            appendLine("procs_blocked 0")
+        synchronized(fakeProcLock) {
+            fakeProcDir.mkdirs()
+            val cores = max(1, Runtime.getRuntime().availableProcessors())
+            val statText = buildString {
+                appendLine("cpu  1000 0 1000 100000 0 0 0 0 0 0")
+                for (i in 0 until cores) appendLine("cpu$i 250 0 250 25000 0 0 0 0 0 0")
+                appendLine("intr 0")
+                appendLine("ctxt 10000")
+                appendLine("btime 1700000000")
+                appendLine("processes 100")
+                appendLine("procs_running 1")
+                appendLine("procs_blocked 0")
+            }
+            writeOnceAtomic(File(fakeProcDir, "stat"), statText)
+            writeOnceAtomic(File(fakeProcDir, "version"), "Linux version 6.1.0-atelier (gcc 13.2.0) #1 SMP PREEMPT aarch64\n")
+            writeOnceAtomic(File(fakeProcDir, "uptime"), "3600.00 7200.00\n")
+            writeOnceAtomic(File(fakeProcDir, "loadavg"), "0.15 0.12 0.10 1/128 4096\n")
+            writeOnceAtomic(File(fakeProcDir, "vmstat"), "nr_free_pages 262144\nnr_active_anon 65536\n")
         }
-        File(fakeProcDir, "stat").writeText(statText)
-        File(fakeProcDir, "version").writeText("Linux version 6.1.0-atelier (gcc 13.2.0) #1 SMP PREEMPT aarch64\n")
-        File(fakeProcDir, "uptime").writeText("3600.00 7200.00\n")
-        File(fakeProcDir, "loadavg").writeText("0.15 0.12 0.10 1/128 4096\n")
-        File(fakeProcDir, "vmstat").writeText("nr_free_pages 262144\nnr_active_anon 65536\n")
+    }
+
+    fun cleanRootfsTmpSafe() {
+        runCatching {
+            val tmp = File(rootfsDir, "tmp")
+            if (tmp.exists() && tmp.isDirectory) {
+                val cutoff = System.currentTimeMillis() - 600_000L
+                tmp.listFiles()?.forEach { if (it.lastModified() < cutoff) it.deleteRecursively() }
+            }
+        }
+    }
+
+    private fun writeOnceAtomic(target: File, text: String) {
+        if (target.exists() && target.length() > 0L) return
+        val tmp = File(target.parentFile, ".${target.name}.tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(target)) { tmp.copyTo(target, overwrite = true); tmp.delete() }
     }
 
     fun ensureRootfsNetworking() {

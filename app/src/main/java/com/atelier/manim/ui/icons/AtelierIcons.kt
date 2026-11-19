@@ -219,4 +219,20 @@ object AtelierIcons {
             moveTo(4f, 12f); lineTo(20f, 12f)
         }
     }
+
+    val Copy by lazy {
+        icon("Copy") {
+            moveTo(9f, 9f); lineTo(19f, 9f); lineTo(19f, 19f); lineTo(9f, 19f); close()
+            moveTo(5f, 15f); lineTo(5f, 5f); lineTo(15f, 5f)
+        }
+    }
+
+    val Inspect by lazy {
+        icon("Inspect") {
+            moveTo(4f, 5f); lineTo(20f, 5f); lineTo(20f, 19f); lineTo(4f, 19f); close()
+            moveTo(8f, 9f); lineTo(16f, 9f)
+            moveTo(8f, 12.5f); lineTo(14f, 12.5f)
+            moveTo(8f, 16f); lineTo(12f, 16f)
+        }
+    }
 }

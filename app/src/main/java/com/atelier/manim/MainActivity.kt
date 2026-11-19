@@ -24,7 +24,19 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* Render continues cleanly even if notification permission is declined */ }
+    ) { }
+
+    private val importFilesLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) viewModel.importFilesFromUris(uris)
+    }
+
+    private val exportZipLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri != null) viewModel.exportWorkspaceZipToUri(uri)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,28 +44,30 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
         )
+        requestNotificationsOnceOnLaunch()
 
         setContent {
             val isDark by viewModel.isDarkTheme.collectAsState()
             AtelierTheme(darkTheme = isDark) {
                 AtelierMainScreen(
                     viewModel = viewModel,
-                    onRequestNotificationPermission = { requestNotificationsIfNeeded() }
+                    onImportFiles = { runCatching { importFilesLauncher.launch(arrayOf("*/*")) } },
+                    onExportWorkspaceZip = { runCatching { exportZipLauncher.launch("atelier_workspace.zip") } }
                 )
             }
         }
     }
 
-    private fun requestNotificationsIfNeeded() {
+    private fun requestNotificationsOnceOnLaunch() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val prefs = getSharedPreferences("atelier_ui", MODE_PRIVATE)
+            if (prefs.getBoolean("notif_asked_v1", false)) return
             val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
+                this, Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) {
-                runCatching {
-                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                }
+                prefs.edit().putBoolean("notif_asked_v1", true).apply()
+                runCatching { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
             }
         }
     }

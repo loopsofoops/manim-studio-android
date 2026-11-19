@@ -113,6 +113,7 @@ fun ExactPreviewStage(
                 artifact.kind == OutputKind.VIDEO && artifact.path.isNotBlank() && File(artifact.path).exists() -> {
                     ExactVideoSurface(
                         artifact = artifact,
+                        isRenderRunning = execution.isRunning,
                         showGrid = showGrid,
                         isExpanded = isExpanded,
                         onToggleGrid = { showGrid = !showGrid },
@@ -235,6 +236,7 @@ fun ExactPreviewStage(
 @Composable
 private fun ExactVideoSurface(
     artifact: OutputArtifact,
+    isRenderRunning: Boolean,
     showGrid: Boolean,
     isExpanded: Boolean,
     onToggleGrid: () -> Unit,
@@ -298,6 +300,10 @@ private fun ExactVideoSurface(
 
     LaunchedEffect(speedIdx) {
         exoPlayer.playbackParameters = PlaybackParameters(speeds[speedIdx])
+    }
+
+    LaunchedEffect(isRenderRunning) {
+        if (isRenderRunning) exoPlayer.pause()
     }
 
     LaunchedEffect(exoPlayer) {
@@ -390,36 +396,46 @@ private fun ExactVideoSurface(
             }
         }
 
-        // Precision Transport Controls Bar
+        // Non-Clipping Precision Transport Controls Bar
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(colors.surface)
-                .padding(horizontal = 10.dp, vertical = 4.dp)
+                .padding(horizontal = 10.dp, vertical = 3.dp)
         ) {
-            Slider(
-                value = if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-                onValueChange = { frac ->
-                    val target = (frac * durationMs).roundToLong()
-                    positionMs = target
-                    exoPlayer.seekTo(target)
-                },
-                colors = SliderDefaults.colors(
-                    thumbColor = colors.textPrimary,
-                    activeTrackColor = colors.accent,
-                    inactiveTrackColor = colors.hairline
-                ),
-                modifier = Modifier.fillMaxWidth().height(24.dp)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Slider(
+                    value = if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f,
+                    onValueChange = { frac ->
+                        val target = (frac * durationMs).roundToLong()
+                        positionMs = target
+                        exoPlayer.seekTo(target)
+                    },
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.textPrimary,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.hairline
+                    ),
+                    modifier = Modifier.weight(1f).height(22.dp)
+                )
+                Text(
+                    text = "${formatTimecode(positionMs)} / ${formatTimecode(durationMs)} · F$currentFrame/$totalFrames",
+                    color = colors.textSecondary,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    style = TextStyle(fontFeatureSettings = "tnum", fontFamily = FontFamily.Monospace)
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     StageIconBtn(AtelierIcons.StepBack, false) {
                         exoPlayer.pause()
                         val target = max(0L, exoPlayer.currentPosition - frameStepMs)
@@ -438,19 +454,6 @@ private fun ExactVideoSurface(
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     }
                     Text(
-                        text = "${formatTimecode(positionMs)} / ${formatTimecode(durationMs)} · F$currentFrame/$totalFrames",
-                        color = colors.textSecondary,
-                        fontSize = 10.sp,
-                        style = TextStyle(fontFeatureSettings = "tnum", fontFamily = FontFamily.Monospace),
-                        modifier = Modifier.padding(start = 6.dp)
-                    )
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Text(
                         text = "${speeds[speedIdx]}x",
                         color = colors.textSecondary,
                         fontSize = 11.sp,
@@ -458,8 +461,11 @@ private fun ExactVideoSurface(
                         modifier = Modifier
                             .clip(RoundedCornerShape(5.dp))
                             .clickable { speedIdx = (speedIdx + 1) % speeds.size }
-                            .padding(horizontal = 5.dp, vertical = 4.dp)
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
                     )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     StageIconBtn(AtelierIcons.Loop, isLooping) { isLooping = !isLooping }
                     StageIconBtn(AtelierIcons.Grid, showGrid, onToggleGrid)
                     StageIconBtn(AtelierIcons.Save, false, onSaveToStorage)

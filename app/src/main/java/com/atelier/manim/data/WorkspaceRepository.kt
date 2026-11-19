@@ -1,11 +1,16 @@
 package com.atelier.manim.data
 
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
 
 object StarterTemplates {
     private const val D = "$"
@@ -213,12 +218,15 @@ fun detectManimScenes(code: String): List<String> {
     return scenes.toList()
 }
 
+data class DiskTreeEntry(val relativePath: String, val isDirectory: Boolean)
+
 class WorkspaceRepository(
-    context: Context,
+    private val appContext: Context,
     private val dao: AtelierDao,
     private val blobStore: HistoryBlobStore
 ) {
-    val workspaceDir: File = File(context.filesDir, "workspace").apply { mkdirs() }
+    val workspaceDir: File = File(appContext.filesDir, "workspace").apply { mkdirs() }
+    private val writeMutex = Mutex()
 
     fun observeFiles(): Flow<List<ProjectFileEntity>> = dao.observeFiles()
 
@@ -270,7 +278,7 @@ class WorkspaceRepository(
             writeAtomic(disk, content)
 
             val entity = ProjectFileEntity(
-                name = candidate,
+                name = candidate.substringAfterLast('/'),
                 relativePath = candidate,
                 language = language,
                 createdAt = now,
@@ -302,39 +310,42 @@ class WorkspaceRepository(
         outputType: String = "NONE",
         outputMeta: String = ""
     ): FileRevisionEntity? = withContext(Dispatchers.IO) {
-        val disk = resolveDiskFile(entity)
-        writeAtomic(disk, content)
+        writeMutex.withLock {
+            val fresh = dao.getFileById(entity.id) ?: entity
+            val disk = resolveDiskFile(fresh)
+            writeAtomic(disk, content)
 
-        val now = System.currentTimeMillis()
-        val hash = blobStore.writeBlob(content)
-        val latest = dao.getLatestRevision(entity.id)
+            val now = System.currentTimeMillis()
+            val hash = blobStore.writeBlob(content)
+            val latest = dao.getLatestRevision(fresh.id)
 
-        val updatedEntity = entity.copy(
-            updatedAt = now,
-            lastOutputPath = if (outputPath.isNotEmpty()) outputPath else entity.lastOutputPath,
-            lastOutputType = if (outputPath.isNotEmpty()) outputType else entity.lastOutputType,
-            lastOutputMeta = if (outputMeta.isNotEmpty()) outputMeta else entity.lastOutputMeta
-        )
-        dao.updateFile(updatedEntity)
+            val updatedEntity = fresh.copy(
+                updatedAt = now,
+                lastOutputPath = if (outputPath.isNotEmpty()) outputPath else fresh.lastOutputPath,
+                lastOutputType = if (outputPath.isNotEmpty()) outputType else fresh.lastOutputType,
+                lastOutputMeta = if (outputMeta.isNotEmpty()) outputMeta else fresh.lastOutputMeta
+            )
+            dao.updateFile(updatedEntity)
 
-        if (triggerType == "EDIT" && latest != null && latest.contentHash == hash && outputPath.isEmpty()) {
-            return@withContext latest
+            if (triggerType == "EDIT" && latest != null && latest.contentHash == hash && outputPath.isEmpty()) {
+                return@withLock latest
+            }
+
+            val rev = FileRevisionEntity(
+                fileId = fresh.id,
+                contentHash = hash,
+                sizeBytes = content.toByteArray(Charsets.UTF_8).size.toLong(),
+                lineCount = content.count { it == '\n' } + 1,
+                createdAt = now,
+                label = label,
+                triggerType = triggerType,
+                outputPath = outputPath,
+                outputType = outputType,
+                outputMeta = outputMeta
+            )
+            val revId = dao.insertRevision(rev)
+            rev.copy(id = revId)
         }
-
-        val rev = FileRevisionEntity(
-            fileId = entity.id,
-            contentHash = hash,
-            sizeBytes = content.toByteArray(Charsets.UTF_8).size.toLong(),
-            lineCount = content.count { it == '\n' } + 1,
-            createdAt = now,
-            label = label,
-            triggerType = triggerType,
-            outputPath = outputPath,
-            outputType = outputType,
-            outputMeta = outputMeta
-        )
-        val revId = dao.insertRevision(rev)
-        rev.copy(id = revId)
     }
 
     suspend fun restoreRevision(
@@ -363,7 +374,7 @@ class WorkspaceRepository(
             if (oldDisk.exists()) oldDisk.renameTo(newDisk)
             val lang = inferLanguage(safe, entity.language)
             val updated = entity.copy(
-                name = safe,
+                name = safe.substringAfterLast('/'),
                 relativePath = safe,
                 language = lang,
                 updatedAt = System.currentTimeMillis()
@@ -377,27 +388,121 @@ class WorkspaceRepository(
         dao.deleteFileById(entity.id)
     }
 
+    suspend fun syncWorkspaceFromDisk(): Int = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            var added = 0
+            val existing = dao.getAllFiles().associateBy { it.relativePath }
+            workspaceDir.walkTopDown().filter { it.isFile && !it.name.startsWith(".") }.forEach { f ->
+                val rel = f.relativeTo(workspaceDir).path
+                if (rel !in existing && !rel.contains("/__pycache__/") && !rel.startsWith("__pycache__/")) {
+                    val lang = inferLanguageForPath(rel)
+                    val now = f.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+                    val ent = ProjectFileEntity(name = f.name, relativePath = rel, language = lang, createdAt = now, updatedAt = now)
+                    val id = dao.insertFile(ent)
+                    if (f.length() < 1_000_000L && isEditableTextFile(rel)) {
+                        val txt = runCatching { f.readText(Charsets.UTF_8) }.getOrDefault("")
+                        val hash = blobStore.writeBlob(txt)
+                        dao.insertRevision(FileRevisionEntity(fileId = id, contentHash = hash, sizeBytes = f.length(), lineCount = txt.count { it == '\n' } + 1, createdAt = now, label = "Synced from Disk", triggerType = "SAVE"))
+                    }
+                    added++
+                }
+            }
+            added
+        }
+    }
+
+    suspend fun importDocumentUris(uris: List<Uri>, folder: String = ""): List<ProjectFileEntity> = withContext(Dispatchers.IO) {
+        val imported = mutableListOf<ProjectFileEntity>()
+        val cleanFolder = folder.trim().trim('/').split('/').filter { it.isNotBlank() && it != "." && it != ".." }
+            .joinToString("/") { it.replace(Regex("[^A-Za-z0-9._-]"), "_") }
+        for (uri in uris) {
+            runCatching {
+                val rawName = resolveDisplayName(uri) ?: "imported_${System.currentTimeMillis()}.py"
+                val relPath = if (cleanFolder.isNotEmpty()) "$cleanFolder/$rawName" else rawName
+                val lang = inferLanguageForPath(relPath)
+                val bytes = appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching
+                val safeRel = sanitizeFileName(relPath, lang)
+                val target = File(workspaceDir, safeRel)
+                target.parentFile?.mkdirs()
+                FileOutputStream(target).use { out -> out.write(bytes); out.fd.sync() }
+                val existing = dao.getFileByPath(safeRel)
+                val now = System.currentTimeMillis()
+                val entity = if (existing != null) {
+                    val upd = existing.copy(updatedAt = now, language = lang)
+                    dao.updateFile(upd); upd
+                } else {
+                    val ent = ProjectFileEntity(name = target.name, relativePath = safeRel, language = lang, createdAt = now, updatedAt = now)
+                    ent.copy(id = dao.insertFile(ent))
+                }
+                if (bytes.size < 1_000_000 && isEditableTextFile(safeRel)) {
+                    val txt = bytes.toString(Charsets.UTF_8)
+                    val hash = blobStore.writeBlob(txt)
+                    dao.insertRevision(FileRevisionEntity(fileId = entity.id, contentHash = hash, sizeBytes = bytes.size.toLong(), lineCount = txt.count { it == '\n' } + 1, createdAt = now, label = "Imported via SAF", triggerType = "SAVE"))
+                }
+                imported.add(entity)
+            }
+        }
+        imported
+    }
+
+    fun listDiskTree(): List<DiskTreeEntry> {
+        val out = mutableListOf<DiskTreeEntry>()
+        workspaceDir.walkTopDown().forEach { f ->
+            if (f == workspaceDir) return@forEach
+            val rel = f.relativeTo(workspaceDir).path
+            if (f.name.startsWith(".") || rel.contains("__pycache__")) return@forEach
+            out.add(DiskTreeEntry(rel, f.isDirectory))
+        }
+        return out.sortedBy { it.relativePath }
+    }
+
+    fun inferLanguageForPath(path: String): String = when {
+        path.endsWith(".tex", ignoreCase = true) -> "LATEX"
+        path.endsWith(".pyx", ignoreCase = true) -> "PYTHON"
+        path.endsWith(".py", ignoreCase = true) -> "PYTHON_MANIM"
+        else -> "ASSET"
+    }
+
+    private fun isEditableTextFile(path: String): Boolean =
+        listOf(".py", ".tex", ".pyx", ".txt", ".json", ".md", ".csv", ".yaml", ".yml", ".svg").any { path.endsWith(it, true) }
+
+    private fun resolveDisplayName(uri: Uri): String? {
+        appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) return c.getString(0)
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')
+    }
+
     private fun writeAtomic(target: File, content: String) {
         target.parentFile?.mkdirs()
-        val tmp = File(target.parentFile, ".${target.name}.tmp")
-        FileOutputStream(tmp).use { out ->
-            out.write(content.toByteArray(Charsets.UTF_8))
-            out.fd.sync()
-        }
-        if (!tmp.renameTo(target)) {
-            tmp.copyTo(target, overwrite = true)
-            tmp.delete()
+        val tmp = File(target.parentFile, ".${target.name}.${UUID.randomUUID().toString().take(8)}.tmp")
+        try {
+            FileOutputStream(tmp).use { out ->
+                out.write(content.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+        } finally {
+            if (tmp.exists()) runCatching { tmp.delete() }
         }
     }
 
     private fun sanitizeFileName(raw: String, language: String): String {
-        val cleaned = raw.trim().replace(Regex("[/\\\\:*?\"<>|\\s]+"), "_").trim('_', '.')
-        val base = cleaned.ifBlank { "untitled" }
-        val hasExt = base.contains('.') && base.substringAfterLast('.').length in 1..6
-        if (hasExt) return base
+        val segments = raw.trim().replace('\\', '/').split('/')
+            .filter { it.isNotBlank() && it != "." && it != ".." }
+            .map { seg -> seg.replace(Regex("[:*?\"<>|\\s]+"), "_").trim('_', '.') }
+            .filter { it.isNotBlank() }
+        val joined = if (segments.isEmpty()) "untitled" else segments.joinToString("/")
+        val leaf = joined.substringAfterLast('/')
+        val hasExt = leaf.contains('.') && leaf.substringAfterLast('.').length in 1..6
+        if (hasExt) return joined
         return when (language) {
-            "LATEX" -> "$base.tex"
-            else -> "$base.py"
+            "LATEX" -> "$joined.tex"
+            "ASSET" -> joined
+            else -> "$joined.py"
         }
     }
 

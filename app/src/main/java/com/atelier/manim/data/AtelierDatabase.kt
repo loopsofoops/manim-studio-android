@@ -110,8 +110,14 @@ interface AtelierDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRevision(rev: FileRevisionEntity): Long
 
+    @Query("SELECT * FROM file_revisions WHERE fileId = :fileId ORDER BY createdAt DESC, id DESC")
+    suspend fun getRevisionsForFile(fileId: Long): List<FileRevisionEntity>
+
     @Query("SELECT * FROM render_history ORDER BY createdAt DESC LIMIT 100")
     fun observeRenderHistory(): Flow<List<RenderHistoryEntity>>
+
+    @Query("SELECT * FROM render_history ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun getRecentRenderHistory(limit: Int): List<RenderHistoryEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRenderHistory(entry: RenderHistoryEntity): Long

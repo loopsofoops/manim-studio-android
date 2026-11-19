@@ -53,6 +53,7 @@ import com.atelier.manim.data.DiffKind
 import com.atelier.manim.data.FileRevisionEntity
 import com.atelier.manim.data.LineDiff
 import com.atelier.manim.data.ProjectFileEntity
+import com.atelier.manim.runtime.ComputeProfile
 import com.atelier.manim.runtime.DiagnosticItem
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
@@ -249,6 +250,9 @@ fun LibrarySheet(
     onSelectFile: (ProjectFileEntity) -> Unit,
     onCreateFile: (String, String) -> Unit,
     onDeleteFile: (ProjectFileEntity) -> Unit,
+    onImportFiles: () -> Unit,
+    onExportZip: () -> Unit,
+    onSyncDisk: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val colors = LocalAtelierColors.current
@@ -269,13 +273,20 @@ fun LibrarySheet(
                 .padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Workspace Files", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Workspace Files", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PillChip("Import", true) { onDismiss(); onImportFiles() }
+                    PillChip("ZIP", false) { onDismiss(); onExportZip() }
+                    PillChip("Sync", false) { onSyncDisk() }
+                }
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 AtelierInputBox(
                     value = newName,
                     onValueChange = { newName = it },
-                    placeholder = "New file name (e.g. scene.py, notes.tex)",
+                    placeholder = "File or folder/file (e.g. ep1/scene.py)",
                     modifier = Modifier.weight(1f)
                 )
                 Box(
@@ -324,7 +335,7 @@ fun LibrarySheet(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                item.name,
+                                item.relativePath,
                                 color = colors.textPrimary,
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Monospace,
@@ -504,11 +515,15 @@ fun FileHistorySheet(
 @Composable
 fun ConsoleDrawerSheet(
     execution: ExecutionState,
+    consoleLog: String,
     replEntries: List<ReplEntry>,
     replVars: List<ReplVar>,
     replBusy: Boolean,
     onSendStdin: (String) -> Unit,
     onClearConsole: () -> Unit,
+    onCopyErrors: () -> Unit,
+    onCopyFullLog: () -> Unit,
+    onCopyIssues: () -> Unit,
     onEvalRepl: (String) -> Unit,
     onResetRepl: () -> Unit,
     onRunPip: (String, String) -> Unit,
@@ -579,15 +594,22 @@ fun ConsoleDrawerSheet(
 
             when (tab) {
                 0 -> {
-                    // Console + live stdin + quick shell
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    // Console + Copy buttons + live stdin + quick shell
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             execution.stageLabel.ifBlank { "Idle" },
                             color = colors.textSecondary,
                             fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
-                        Text("Clear", color = colors.accent, fontSize = 11.sp, modifier = Modifier.clickable(onClick = onClearConsole))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Copy Errors", color = colors.error, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onCopyErrors))
+                            Text("Copy Log", color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onCopyFullLog))
+                            Text("Clear", color = colors.textSecondary, fontSize = 11.sp, modifier = Modifier.clickable(onClick = onClearConsole))
+                        }
                     }
                     Box(
                         modifier = Modifier
@@ -600,7 +622,7 @@ fun ConsoleDrawerSheet(
                             .padding(10.dp)
                     ) {
                         Text(
-                            text = execution.consoleLog.ifBlank { "No console output yet." },
+                            text = consoleLog.ifBlank { "No console output yet." },
                             color = colors.textPrimary,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
@@ -750,6 +772,13 @@ fun ConsoleDrawerSheet(
                             Text("No errors or warnings detected.", color = colors.textMuted, fontSize = 12.sp)
                         }
                     } else {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Tap an issue to jump to its line", color = colors.textSecondary, fontSize = 11.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("Copy Issues", color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onCopyIssues))
+                                Text("Copy Full Report", color = colors.error, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onCopyErrors))
+                            }
+                        }
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
                             items(execution.diagnostics) { d ->
                                 Row(
@@ -795,18 +824,23 @@ fun SettingsSheet(
     customFps: Int,
     disableCache: Boolean,
     autoSaveStorage: Boolean,
+    autoExportCrashReports: Boolean,
+    computeProfile: ComputeProfile,
     isDark: Boolean,
     fontSizeSp: Int,
     useNoSeccomp: Boolean,
     onSelectPreset: (ManimPreset) -> Unit,
     onSelectFormat: (OutputFormat) -> Unit,
     onCustomDims: (Int, Int, Int) -> Unit,
+    onSelectComputeProfile: (ComputeProfile) -> Unit,
     onToggleCache: (Boolean) -> Unit,
     onToggleAutoSave: (Boolean) -> Unit,
+    onToggleAutoExportCrash: (Boolean) -> Unit,
     onToggleTheme: () -> Unit,
     onFontSize: (Int) -> Unit,
     onToggleNoSeccomp: (Boolean) -> Unit,
     onClearManimCache: () -> Unit,
+    onOpenInspector: () -> Unit,
     onOpenRuntimeSetup: () -> Unit,
     onReinstallRuntime: () -> Unit,
     onDismiss: () -> Unit
@@ -862,7 +896,13 @@ fun SettingsSheet(
 
             HorizontalDivider(color = colors.hairline)
 
+            SectionTitle("CPU Thread Profile (OpenMP / OpenBLAS)")
+            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ComputeProfile.entries.forEach { cp -> PillChip(cp.label, computeProfile == cp) { onSelectComputeProfile(cp) } }
+            }
+
             SettingSwitchRow("Auto-Save Renders to Device Storage", "Saves MP4 to Movies/Atelier, PDF to Documents/Atelier", autoSaveStorage, onToggleAutoSave)
+            SettingSwitchRow("Auto-Save Crash & Failure Reports", "Saves failed run & crash logs to Documents/Atelier/CrashReports", autoExportCrashReports, onToggleAutoExportCrash)
             SettingSwitchRow("Disable Manim Partial Movie Cache", "Forces clean full re-render on every run", disableCache, onToggleCache)
             SettingSwitchRow("Obsidian Dark Appearance", "Switch between Obsidian dark and Alabaster light", isDark) { onToggleTheme() }
             SettingSwitchRow("PRoot No-Seccomp Mode", "Recommended for Samsung, Xiaomi, OnePlus & Android 14+", useNoSeccomp, onToggleNoSeccomp)
@@ -880,7 +920,10 @@ fun SettingsSheet(
             }
 
             HorizontalDivider(color = colors.hairline)
-            SectionTitle("Maintenance & Runtime")
+            SectionTitle("Diagnostics, Maintenance & Runtime")
+            OutlinedButton(onClick = { onDismiss(); onOpenInspector() }, modifier = Modifier.fillMaxWidth()) {
+                Text("Open Studio Inspector & Crash Reports", color = colors.accent, fontSize = 12.sp)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = onClearManimCache, modifier = Modifier.weight(1f)) {
                     Text("Clear Render Cache", color = colors.textPrimary, fontSize = 12.sp)

@@ -28,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.atelier.manim.runtime.ManimRenderMode
 import com.atelier.manim.runtime.OutputKind
 import com.atelier.manim.runtime.RuntimeState
 import com.atelier.manim.ui.editor.AtelierCodeEditor
@@ -51,13 +53,17 @@ import com.atelier.manim.ui.theme.LocalAtelierColors
 @Composable
 fun AtelierMainScreen(
     viewModel: AtelierViewModel,
-    onRequestNotificationPermission: () -> Unit
+    onImportFiles: () -> Unit,
+    onExportWorkspaceZip: () -> Unit
 ) {
     val colors = LocalAtelierColors.current
     val context = LocalContext.current
 
     val runtimeState by viewModel.runtimeState.collectAsState()
     val execution by viewModel.executionState.collectAsState()
+    val consoleLog by viewModel.consoleLog.collectAsState()
+    val crashReports by viewModel.crashReports.collectAsState()
+    val pendingCrashAlert by viewModel.pendingCrashAlert.collectAsState()
     val files by viewModel.files.collectAsState()
     val activeFile by viewModel.activeFile.collectAsState()
     val revisions by viewModel.revisions.collectAsState()
@@ -67,11 +73,16 @@ fun AtelierMainScreen(
     val selectedScene by viewModel.selectedScene.collectAsState()
     val preset by viewModel.preset.collectAsState()
     val outputFormat by viewModel.outputFormat.collectAsState()
+    val renderMode by viewModel.renderMode.collectAsState()
+    val animRangeStart by viewModel.animRangeStart.collectAsState()
+    val animRangeEnd by viewModel.animRangeEnd.collectAsState()
     val customW by viewModel.customWidth.collectAsState()
     val customH by viewModel.customHeight.collectAsState()
     val customFps by viewModel.customFps.collectAsState()
     val disableCache by viewModel.disableCache.collectAsState()
     val autoSaveStorage by viewModel.autoSaveStorage.collectAsState()
+    val autoExportCrash by viewModel.autoExportCrashReports.collectAsState()
+    val computeProfile by viewModel.computeProfile.collectAsState()
     val isDark by viewModel.isDarkTheme.collectAsState()
     val fontSizeSp by viewModel.fontSizeSp.collectAsState()
     val replEntries by viewModel.replEntries.collectAsState()
@@ -88,13 +99,13 @@ fun AtelierMainScreen(
     var showHistorySheet by remember { mutableStateOf(false) }
     var showConsoleSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
+    var showInspectorSheet by remember { mutableStateOf(false) }
+    var inspectorInitialTab by remember { mutableIntStateOf(0) }
+    var showRangeDialog by remember { mutableStateOf(false) }
     var jumpToLine by remember { mutableStateOf<Int?>(null) }
 
-    // Automatically open preview stage when a fresh artifact arrives
     LaunchedEffect(execution.activeArtifact.timestamp) {
-        if (execution.activeArtifact.kind != OutputKind.NONE) {
-            showStage = true
-        }
+        if (execution.activeArtifact.kind != OutputKind.NONE) showStage = true
     }
 
     Box(
@@ -106,59 +117,44 @@ fun AtelierMainScreen(
             .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // 1. Minimalist Apple-Style Top Studio Bar
+            // 1. Minimalist Top Studio Bar
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .background(colors.surface)
-                    .padding(horizontal = 10.dp),
+                modifier = Modifier.fillMaxWidth().height(48.dp).background(colors.surface).padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     TopIconBtn(AtelierIcons.Folder, active = false) { showLibrarySheet = true }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { showLibrarySheet = true }
-                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showLibrarySheet = true }.padding(horizontal = 5.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = activeFile?.name ?: "Atelier",
-                            color = colors.textPrimary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            text = activeFile?.relativePath ?: "Atelier",
+                            color = colors.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                            fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                         if (isDirty) {
                             Spacer(Modifier.width(5.dp))
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .clip(CircleShape)
-                                    .background(colors.accent)
-                            )
+                            Box(Modifier.size(6.dp).clip(CircleShape).background(colors.accent))
                         }
                     }
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     TopIconBtn(AtelierIcons.StageToggle, active = showStage) {
                         if (stageExpanded) stageExpanded = false else showStage = !showStage
                     }
+                    TopIconBtn(AtelierIcons.Inspect, active = pendingCrashAlert != null) {
+                        inspectorInitialTab = if (pendingCrashAlert != null) 4 else 0
+                        showInspectorSheet = true
+                    }
                     TopIconBtn(AtelierIcons.History, active = false) { showHistorySheet = true }
-                    TopIconBtn(AtelierIcons.Terminal, active = execution.diagnostics.isNotEmpty()) {
+                    TopIconBtn(AtelierIcons.Terminal, active = execution.diagnostics.isNotEmpty() || execution.bannerIsError) {
                         showConsoleSheet = true
                     }
                     TopIconBtn(AtelierIcons.Settings, active = false) { showSettingsSheet = true }
@@ -180,15 +176,14 @@ fun AtelierMainScreen(
                                     execution.isRunning -> viewModel.cancelExecution()
                                     !isReady -> showRuntimeSheet = true
                                     else -> {
-                                        onRequestNotificationPermission()
                                         showStage = true
                                         viewModel.runPrimaryAction()
                                     }
                                 }
                             }
-                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Icon(
                             imageVector = if (execution.isRunning) AtelierIcons.Stop else AtelierIcons.Play,
@@ -203,19 +198,37 @@ fun AtelierMainScreen(
                             detectedScenes.isNotEmpty() -> "Render"
                             else -> "Run"
                         }
-                        Text(
-                            text = actionText,
-                            color = if (isReady || execution.isRunning) Color.White else colors.textPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Text(actionText, color = if (isReady || execution.isRunning) Color.White else colors.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
 
             HorizontalDivider(thickness = 1.dp, color = colors.hairline)
 
-            // 2. Runtime Banner (only shown if offline runtime is not yet installed)
+            // 1b. Crash Recovery Banner (Only appears if prior session crashed / LMK killed)
+            pendingCrashAlert?.let { alert ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().background(colors.diffRemovedBg).padding(horizontal = 12.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${alert.title}: ${alert.summary}",
+                        color = colors.error, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).clickable { inspectorInitialTab = 4; showInspectorSheet = true }
+                    )
+                    Text("Copy", color = colors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable {
+                        viewModel.copyToClipboard(alert.title, viewModel.readCrashReport(alert))
+                    })
+                    Text("View", color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable {
+                        inspectorInitialTab = 4; showInspectorSheet = true
+                    })
+                    Icon(AtelierIcons.Close, "Dismiss", tint = colors.textSecondary, modifier = Modifier.size(15.dp).clickable { viewModel.dismissPendingCrashAlert() })
+                }
+                HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+            }
+
+            // 2. Runtime Banner
             if (runtimeState !is RuntimeState.Ready && runtimeState !is RuntimeState.Checking) {
                 val promptText = when (val st = runtimeState) {
                     is RuntimeState.Downloading -> "Downloading offline runtime..."
@@ -226,13 +239,8 @@ fun AtelierMainScreen(
                     else -> "Offline Manim / Python / LaTeX / GCC runtime required — tap to install"
                 }
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(colors.surfaceElevated)
-                        .clickable { showRuntimeSheet = true }
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier.fillMaxWidth().background(colors.surfaceElevated).clickable { showRuntimeSheet = true }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(promptText, color = colors.textPrimary, fontSize = 11.sp, modifier = Modifier.weight(1f))
                     Text("Open", color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
@@ -240,14 +248,10 @@ fun AtelierMainScreen(
                 HorizontalDivider(thickness = 1.dp, color = colors.hairline)
             }
 
-            // 3. Context Action Strip (Scene selector + Preset + Pure Python / Compiler quick pills)
+            // 3. Context Action Strip (Scenes + Preset + Fast-Pass Draft/Still/Range + Snapshot)
             if (!stageExpanded) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(colors.surface)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth().background(colors.surface).horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -255,21 +259,31 @@ fun AtelierMainScreen(
                         detectedScenes.forEach { scene ->
                             PillChip(scene, selected = scene == selectedScene) { viewModel.selectScene(scene) }
                         }
-                        PillChip(preset.shortLabel, selected = false) { showSettingsSheet = true }
+                        PillChip(preset.shortLabel, selected = renderMode == ManimRenderMode.FULL) {
+                            if (renderMode != ManimRenderMode.FULL) viewModel.selectRenderMode(ManimRenderMode.FULL) else showSettingsSheet = true
+                        }
+                        PillChip("Draft", selected = renderMode == ManimRenderMode.DRAFT) {
+                            viewModel.selectRenderMode(if (renderMode == ManimRenderMode.DRAFT) ManimRenderMode.FULL else ManimRenderMode.DRAFT)
+                        }
+                        PillChip("Still", selected = renderMode == ManimRenderMode.STILL) {
+                            viewModel.selectRenderMode(if (renderMode == ManimRenderMode.STILL) ManimRenderMode.FULL else ManimRenderMode.STILL)
+                        }
+                        PillChip(
+                            if (renderMode == ManimRenderMode.RANGE) "Range $animRangeStart..$animRangeEnd" else "Range",
+                            selected = renderMode == ManimRenderMode.RANGE
+                        ) { showRangeDialog = true }
                         PillChip("Python", selected = false) {
                             if (runtimeState !is RuntimeState.Ready) showRuntimeSheet = true else viewModel.runAsPurePython()
                         }
                     } else if (activeFile?.language != "LATEX") {
                         PillChip("AST / Bytecode", selected = false) {
                             if (runtimeState !is RuntimeState.Ready) showRuntimeSheet = true else {
-                                viewModel.compileCurrentFile(nativeCython = false)
-                                showConsoleSheet = true
+                                viewModel.compileCurrentFile(nativeCython = false); showConsoleSheet = true
                             }
                         }
                         PillChip("Cython / GCC", selected = false) {
                             if (runtimeState !is RuntimeState.Ready) showRuntimeSheet = true else {
-                                viewModel.compileCurrentFile(nativeCython = true)
-                                showConsoleSheet = true
+                                viewModel.compileCurrentFile(nativeCython = true); showConsoleSheet = true
                             }
                         }
                     } else {
@@ -289,15 +303,11 @@ fun AtelierMainScreen(
                     onSaveToStorage = { viewModel.saveActiveArtifactToStorage() },
                     onShare = { viewModel.shareActiveArtifact(context) },
                     onCancelRender = { viewModel.cancelExecution() },
-                    modifier = if (stageExpanded) {
-                        Modifier.weight(1f).fillMaxWidth()
-                    } else {
-                        Modifier.fillMaxWidth().height(232.dp)
-                    }
+                    modifier = if (stageExpanded) Modifier.weight(1f).fillMaxWidth() else Modifier.fillMaxWidth().height(238.dp)
                 )
             }
 
-            // 5. Code Editor Workspace
+            // 5. Sub-Pixel Aligned Code Editor
             if (!stageExpanded) {
                 AtelierCodeEditor(
                     value = editorValue,
@@ -316,26 +326,40 @@ fun AtelierMainScreen(
             }
         }
 
-        // Subtle Status Pill (auto-dismissing toast or execution banner)
+        // Floating Status / Error Pill with direct Copy Error action
         val statusPill = toastMsg.ifBlank { execution.bannerMessage }
+        val isErrorPill = toastMsg.isBlank() && execution.bannerIsError
         if (statusPill.isNotBlank()) {
-            Box(
+            Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 52.dp, start = 16.dp, end = 16.dp)
+                    .padding(bottom = 50.dp, start = 14.dp, end = 14.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(colors.surfaceElevated)
-                    .border(1.dp, colors.hairline, RoundedCornerShape(10.dp))
+                    .border(1.dp, if (isErrorPill) colors.error.copy(alpha = 0.7f) else colors.hairline, RoundedCornerShape(10.dp))
                     .clickable { viewModel.clearBanner() }
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
                     text = statusPill,
-                    color = colors.textPrimary,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    color = if (isErrorPill) colors.error else colors.textPrimary,
+                    fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
+                if (isErrorPill) {
+                    Text(
+                        text = "Copy Error",
+                        color = colors.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable { viewModel.copyErrorSummary() }
+                    )
+                    Text(
+                        text = "Log",
+                        color = colors.textPrimary, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clickable { showConsoleSheet = true }
+                    )
+                }
             }
         }
     }
@@ -359,21 +383,21 @@ fun AtelierMainScreen(
             onSelectFile = { viewModel.openFile(it) },
             onCreateFile = { name, lang -> viewModel.createNewFile(name, lang) },
             onDeleteFile = { viewModel.deleteFile(it) },
+            onImportFiles = onImportFiles,
+            onExportZip = onExportWorkspaceZip,
+            onSyncDisk = { viewModel.syncWorkspaceFromDisk() },
             onDismiss = { showLibrarySheet = false }
         )
     }
 
     if (showHistorySheet) {
         FileHistorySheet(
-            fileName = activeFile?.name ?: "",
+            fileName = activeFile?.relativePath ?: "",
             currentCode = editorValue.text,
             revisions = revisions,
             readContent = { viewModel.readRevisionContent(it) },
             onRestore = { viewModel.restoreRevision(it) },
-            onPreviewOutput = {
-                viewModel.previewRevisionOutput(it)
-                showStage = true
-            },
+            onPreviewOutput = { viewModel.previewRevisionOutput(it); showStage = true },
             onManualSnapshot = { viewModel.manualSave("Manual Checkpoint") },
             onDismiss = { showHistorySheet = false }
         )
@@ -382,11 +406,15 @@ fun AtelierMainScreen(
     if (showConsoleSheet) {
         ConsoleDrawerSheet(
             execution = execution,
+            consoleLog = consoleLog,
             replEntries = replEntries,
             replVars = replVars,
             replBusy = replBusy,
             onSendStdin = { viewModel.sendStdin(it) },
             onClearConsole = { viewModel.clearConsole() },
+            onCopyErrors = { viewModel.copyErrorSummary() },
+            onCopyFullLog = { viewModel.copyFullConsoleLog() },
+            onCopyIssues = { viewModel.copyDiagnosticsList() },
             onEvalRepl = { viewModel.evaluateRepl(it) },
             onResetRepl = { viewModel.resetRepl() },
             onRunPip = { act, pkg -> viewModel.runPip(act, pkg) },
@@ -395,6 +423,31 @@ fun AtelierMainScreen(
             onCompileNativeCython = { viewModel.compileCurrentFile(true) },
             onJumpToLine = { jumpToLine = it },
             onDismiss = { showConsoleSheet = false }
+        )
+    }
+
+    if (showInspectorSheet) {
+        StudioInspectorSheet(
+            crashReports = crashReports,
+            initialTab = inspectorInitialTab,
+            loadSectionText = { viewModel.loadInspectorSection(it) },
+            readCrashReport = { viewModel.readCrashReport(it) },
+            onCopyText = { lbl, txt -> viewModel.copyToClipboard(lbl, txt) },
+            onExportTextFile = { title, body -> viewModel.exportTextToDocs(title, body) },
+            onClearCrashReports = { viewModel.clearAllCrashReports() },
+            onDismiss = { showInspectorSheet = false }
+        )
+    }
+
+    if (showRangeDialog) {
+        AnimRangeDialog(
+            initialStart = animRangeStart,
+            initialEnd = animRangeEnd,
+            onApply = { s, e ->
+                viewModel.setAnimRange(s, e)
+                viewModel.selectRenderMode(ManimRenderMode.RANGE)
+            },
+            onDismiss = { showRangeDialog = false }
         )
     }
 
@@ -407,18 +460,23 @@ fun AtelierMainScreen(
             customFps = customFps,
             disableCache = disableCache,
             autoSaveStorage = autoSaveStorage,
+            autoExportCrashReports = autoExportCrash,
+            computeProfile = computeProfile,
             isDark = isDark,
             fontSizeSp = fontSizeSp,
             useNoSeccomp = viewModel.getUseNoSeccomp(),
             onSelectPreset = { viewModel.selectPreset(it) },
             onSelectFormat = { viewModel.selectOutputFormat(it) },
             onCustomDims = { w, h, f -> viewModel.setCustomDimensions(w, h, f) },
+            onSelectComputeProfile = { viewModel.setComputeProfile(it) },
             onToggleCache = { viewModel.setDisableCache(it) },
             onToggleAutoSave = { viewModel.setAutoSaveStorage(it) },
+            onToggleAutoExportCrash = { viewModel.setAutoExportCrashReports(it) },
             onToggleTheme = { viewModel.toggleTheme() },
             onFontSize = { viewModel.setFontSize(it) },
             onToggleNoSeccomp = { viewModel.setUseNoSeccomp(it) },
             onClearManimCache = { viewModel.clearManimCache() },
+            onOpenInspector = { inspectorInitialTab = 0; showInspectorSheet = true },
             onOpenRuntimeSetup = { showRuntimeSheet = true },
             onReinstallRuntime = { viewModel.reinstallRuntime(); showRuntimeSheet = true },
             onDismiss = { showSettingsSheet = false }
@@ -434,18 +492,11 @@ private fun TopIconBtn(
 ) {
     val colors = LocalAtelierColors.current
     Box(
-        modifier = Modifier
-            .size(32.dp)
-            .clip(RoundedCornerShape(8.dp))
+        modifier = Modifier.size(30.dp).clip(RoundedCornerShape(8.dp))
             .background(if (active) colors.surfaceElevated else Color.Transparent)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (active) colors.accent else colors.textSecondary,
-            modifier = Modifier.size(18.dp)
-        )
+        Icon(imageVector = icon, contentDescription = null, tint = if (active) colors.accent else colors.textSecondary, modifier = Modifier.size(17.dp))
     }
 }

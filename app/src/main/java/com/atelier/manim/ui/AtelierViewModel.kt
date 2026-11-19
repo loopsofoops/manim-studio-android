@@ -2,6 +2,9 @@ package com.atelier.manim.ui
 
 import android.app.Application
 import android.content.Context
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.os.Build
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.AndroidViewModel
@@ -12,8 +15,11 @@ import com.atelier.manim.data.ProjectFileEntity
 import com.atelier.manim.data.RenderHistoryEntity
 import com.atelier.manim.data.StarterTemplates
 import com.atelier.manim.data.detectManimScenes
+import com.atelier.manim.runtime.ComputeProfile
+import com.atelier.manim.runtime.CrashReportEntry
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
+import com.atelier.manim.runtime.ManimRenderMode
 import com.atelier.manim.runtime.OutputArtifact
 import com.atelier.manim.runtime.OutputFormat
 import com.atelier.manim.runtime.OutputKind
@@ -21,6 +27,7 @@ import com.atelier.manim.runtime.ReplEntry
 import com.atelier.manim.runtime.ReplVar
 import com.atelier.manim.runtime.RuntimeState
 import com.atelier.manim.runtime.VideoTelemetry
+import com.atelier.manim.runtime.decodeExitSignal
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -33,15 +40,20 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.min
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AtelierViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as AtelierApp
-    private val prefs = application.getSharedPreferences("atelier_ui", Context.MODE_PRIVATE)
+    private val settings = app.settingsStore
 
     val runtimeState: StateFlow<RuntimeState> = app.runtimeManager.state
     val executionState: StateFlow<ExecutionState> = app.coordinator.state
+    val consoleLog: StateFlow<String> = app.coordinator.consoleLog
+    val crashReports: StateFlow<List<CrashReportEntry>> = app.crashReporter.reports
+    val pendingCrashAlert: StateFlow<CrashReportEntry?> = app.crashReporter.pendingCrashAlert
 
     val files: StateFlow<List<ProjectFileEntity>> = app.workspaceRepo.observeFiles()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -65,45 +77,28 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     private val _detectedScenes = MutableStateFlow<List<String>>(emptyList())
     val detectedScenes: StateFlow<List<String>> = _detectedScenes.asStateFlow()
 
-    private val _selectedScene = MutableStateFlow("")
-    val selectedScene: StateFlow<String> = _selectedScene.asStateFlow()
-
-    private val _preset = MutableStateFlow(ManimPreset.MED_720P)
-    val preset: StateFlow<ManimPreset> = _preset.asStateFlow()
-
-    private val _outputFormat = MutableStateFlow(OutputFormat.MP4)
-    val outputFormat: StateFlow<OutputFormat> = _outputFormat.asStateFlow()
-
-    private val _customWidth = MutableStateFlow(1280)
-    val customWidth: StateFlow<Int> = _customWidth.asStateFlow()
-
-    private val _customHeight = MutableStateFlow(720)
-    val customHeight: StateFlow<Int> = _customHeight.asStateFlow()
-
-    private val _customFps = MutableStateFlow(30)
-    val customFps: StateFlow<Int> = _customFps.asStateFlow()
-
-    private val _disableCache = MutableStateFlow(false)
-    val disableCache: StateFlow<Boolean> = _disableCache.asStateFlow()
-
-    private val _autoSaveStorage = MutableStateFlow(prefs.getBoolean("auto_save_storage", true))
-    val autoSaveStorage: StateFlow<Boolean> = _autoSaveStorage.asStateFlow()
-
-    private val _isDarkTheme = MutableStateFlow(prefs.getBoolean("dark_theme", true))
-    val isDarkTheme: StateFlow<Boolean> = _isDarkTheme.asStateFlow()
-
-    private val _fontSizeSp = MutableStateFlow(prefs.getInt("editor_font_sp", 13))
-    val fontSizeSp: StateFlow<Int> = _fontSizeSp.asStateFlow()
+    val selectedScene: StateFlow<String> = settings.selectedScene
+    val preset: StateFlow<ManimPreset> = settings.preset
+    val outputFormat: StateFlow<OutputFormat> = settings.outputFormat
+    val customWidth: StateFlow<Int> = settings.customWidth
+    val customHeight: StateFlow<Int> = settings.customHeight
+    val customFps: StateFlow<Int> = settings.customFps
+    val renderMode: StateFlow<ManimRenderMode> = settings.renderMode
+    val animRangeStart: StateFlow<Int> = settings.animRangeStart
+    val animRangeEnd: StateFlow<Int> = settings.animRangeEnd
+    val disableCache: StateFlow<Boolean> = settings.disableCache
+    val autoSaveStorage: StateFlow<Boolean> = settings.autoSaveStorage
+    val autoExportCrashReports: StateFlow<Boolean> = settings.autoExportCrashReports
+    val isDarkTheme: StateFlow<Boolean> = settings.isDarkTheme
+    val fontSizeSp: StateFlow<Int> = settings.fontSizeSp
+    val computeProfile: StateFlow<ComputeProfile> = settings.computeProfile
 
     private val _replEntries = MutableStateFlow<List<ReplEntry>>(emptyList())
     val replEntries: StateFlow<List<ReplEntry>> = _replEntries.asStateFlow()
-
     private val _replVars = MutableStateFlow<List<ReplVar>>(emptyList())
     val replVars: StateFlow<List<ReplVar>> = _replVars.asStateFlow()
-
     private val _replBusy = MutableStateFlow(false)
     val replBusy: StateFlow<Boolean> = _replBusy.asStateFlow()
-
     private val _toastMessage = MutableStateFlow("")
     val toastMessage: StateFlow<String> = _toastMessage.asStateFlow()
 
@@ -121,6 +116,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     init {
         app.runtimeManager.refreshState()
         viewModelScope.launch {
+            app.workspaceRepo.syncWorkspaceFromDisk()
             val all = app.workspaceRepo.ensureSeeded()
             if (all.isNotEmpty()) openFile(all.first())
         }
@@ -128,6 +124,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
 
     fun openFile(file: ProjectFileEntity) {
         viewModelScope.launch {
+            autosaveJob?.cancel()
             flushSaveIfDirty()
             val text = app.workspaceRepo.readFile(file)
             _activeFile.value = file
@@ -137,17 +134,16 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             redoStack.clear()
             updateUndoFlags()
             refreshDetectedScenes(text, file.language)
+            syncInspectorLiveState()
 
             if (file.lastOutputPath.isNotBlank() && File(file.lastOutputPath).exists()) {
                 val kind = runCatching { OutputKind.valueOf(file.lastOutputType) }.getOrDefault(OutputKind.NONE)
                 if (kind != OutputKind.NONE) {
+                    val outFile = File(file.lastOutputPath)
+                    val telemetry = if (kind == OutputKind.VIDEO) withContext(Dispatchers.IO) { probeVideoLight(outFile) }
+                    else VideoTelemetry(sizeBytes = outFile.length())
                     app.coordinator.setPreviewArtifact(
-                        OutputArtifact(
-                            path = file.lastOutputPath,
-                            kind = kind,
-                            title = file.name,
-                            telemetry = VideoTelemetry(sizeBytes = File(file.lastOutputPath).length())
-                        )
+                        OutputArtifact(path = file.lastOutputPath, kind = kind, title = file.name, telemetry = telemetry)
                     )
                 }
             }
@@ -170,6 +166,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             scheduleAutosave()
         }
         _editorValue.value = newVal
+        syncInspectorLiveState()
     }
 
     fun undo() {
@@ -179,6 +176,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         _isDirty.value = true
         _activeFile.value?.let { refreshDetectedScenes(_editorValue.value.text, it.language) }
         updateUndoFlags()
+        syncInspectorLiveState()
     }
 
     fun redo() {
@@ -188,13 +186,16 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         _isDirty.value = true
         _activeFile.value?.let { refreshDetectedScenes(_editorValue.value.text, it.language) }
         updateUndoFlags()
+        syncInspectorLiveState()
     }
 
     fun manualSave(label: String = "Manual Snapshot") {
         val file = _activeFile.value ?: return
+        autosaveJob?.cancel()
         viewModelScope.launch {
             app.workspaceRepo.saveFile(file, _editorValue.value.text, label = label, triggerType = "SAVE")
             _isDirty.value = false
+            syncInspectorLiveState()
             showToast("Saved snapshot")
         }
     }
@@ -204,17 +205,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             val template = StarterTemplates.blankFor(language)
             val created = app.workspaceRepo.createFile(name, language, template)
             openFile(created)
-            showToast("Created ${created.name}")
-        }
-    }
-
-    fun renameActiveFile(file: ProjectFileEntity, newName: String) {
-        viewModelScope.launch {
-            val renamed = app.workspaceRepo.renameFile(file, newName)
-            if (_activeFile.value?.id == file.id) {
-                _activeFile.value = renamed
-                refreshDetectedScenes(_editorValue.value.text, renamed.language)
-            }
+            showToast("Created ${created.relativePath}")
         }
     }
 
@@ -228,16 +219,45 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun syncWorkspaceFromDisk() {
+        viewModelScope.launch {
+            val added = app.workspaceRepo.syncWorkspaceFromDisk()
+            showToast(if (added > 0) "Synced $added new file(s)" else "Workspace already in sync")
+        }
+    }
+
+    fun importFilesFromUris(uris: List<Uri>) {
+        viewModelScope.launch {
+            val imported = app.workspaceRepo.importDocumentUris(uris)
+            if (imported.isNotEmpty()) {
+                val firstText = imported.firstOrNull { it.language != "ASSET" }
+                if (firstText != null) openFile(firstText)
+                showToast("Imported ${imported.size} file(s)")
+            } else {
+                showToast("No files could be imported")
+            }
+        }
+    }
+
+    fun exportWorkspaceZipToUri(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = app.mediaExport.exportWorkspaceZip(app.workspaceRepo.workspaceDir, uri)
+            showToast(if (res.success) "Exported workspace ZIP" else res.error)
+        }
+    }
+
     fun readRevisionContent(revision: FileRevisionEntity): String =
         app.blobStore.readBlob(revision.contentHash) ?: ""
 
     fun restoreRevision(revision: FileRevisionEntity) {
         val file = _activeFile.value ?: return
+        autosaveJob?.cancel()
         viewModelScope.launch {
             val (restoredText, _) = app.workspaceRepo.restoreRevision(file, revision)
             _editorValue.value = TextFieldValue(restoredText, TextRange(0))
             _isDirty.value = false
             refreshDetectedScenes(restoredText, file.language)
+            syncInspectorLiveState()
             previewRevisionOutput(revision)
             showToast("Restored revision #${revision.id}")
         }
@@ -247,38 +267,39 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         if (revision.outputPath.isBlank() || !File(revision.outputPath).exists()) return
         val kind = runCatching { OutputKind.valueOf(revision.outputType) }.getOrDefault(OutputKind.NONE)
         if (kind == OutputKind.NONE) return
-        app.coordinator.setPreviewArtifact(
-            OutputArtifact(
-                path = revision.outputPath,
-                kind = kind,
-                title = revision.label,
-                telemetry = VideoTelemetry(sizeBytes = File(revision.outputPath).length()),
-                revisionId = revision.id,
-                timestamp = System.currentTimeMillis()
+        viewModelScope.launch {
+            val f = File(revision.outputPath)
+            val tel = if (kind == OutputKind.VIDEO) withContext(Dispatchers.IO) { probeVideoLight(f) } else VideoTelemetry(sizeBytes = f.length())
+            app.coordinator.setPreviewArtifact(
+                OutputArtifact(path = revision.outputPath, kind = kind, title = revision.label, telemetry = tel, revisionId = revision.id, timestamp = System.currentTimeMillis())
             )
-        )
+        }
     }
 
     fun runPrimaryAction() {
         val file = _activeFile.value ?: return
+        autosaveJob?.cancel()
+        _isDirty.value = false
         val code = _editorValue.value.text
+        syncInspectorLiveState()
         when {
             file.language == "LATEX" || file.name.endsWith(".tex", ignoreCase = true) -> {
-                app.coordinator.compileLatex(file, code, _autoSaveStorage.value)
+                app.coordinator.compileLatex(file, code, settings.autoSaveStorage.value)
             }
             _detectedScenes.value.isNotEmpty() -> {
-                val scene = _selectedScene.value.ifBlank { _detectedScenes.value.first() }
+                val scene = settings.selectedScene.value.ifBlank { _detectedScenes.value.first() }
                 app.coordinator.renderManim(
-                    file = file,
-                    code = code,
-                    sceneName = scene,
-                    preset = _preset.value,
-                    customWidth = _customWidth.value,
-                    customHeight = _customHeight.value,
-                    customFps = _customFps.value,
-                    outputFormat = _outputFormat.value,
-                    disableCaching = _disableCache.value,
-                    autoSaveToStorage = _autoSaveStorage.value
+                    file = file, code = code, sceneName = scene,
+                    preset = settings.preset.value,
+                    customWidth = settings.customWidth.value,
+                    customHeight = settings.customHeight.value,
+                    customFps = settings.customFps.value,
+                    outputFormat = settings.outputFormat.value,
+                    renderMode = settings.renderMode.value,
+                    animRangeStart = settings.animRangeStart.value,
+                    animRangeEnd = settings.animRangeEnd.value,
+                    disableCaching = settings.disableCache.value,
+                    autoSaveToStorage = settings.autoSaveStorage.value
                 )
             }
             else -> app.coordinator.runPython(file, code)
@@ -287,11 +308,13 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
 
     fun runAsPurePython() {
         val file = _activeFile.value ?: return
+        autosaveJob?.cancel(); _isDirty.value = false
         app.coordinator.runPython(file, _editorValue.value.text)
     }
 
     fun compileCurrentFile(nativeCython: Boolean) {
         val file = _activeFile.value ?: return
+        autosaveJob?.cancel(); _isDirty.value = false
         app.coordinator.compilePython(file, _editorValue.value.text, nativeCython)
     }
 
@@ -302,35 +325,75 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     fun clearConsole() = app.coordinator.clearConsole()
     fun clearBanner() = app.coordinator.clearBanner()
 
+    // ---- Introspection & Clipboard Copy Helpers ----
+    suspend fun loadInspectorSection(tabIdx: Int): String = withContext(Dispatchers.IO) {
+        syncInspectorLiveState()
+        when (tabIdx) {
+            0 -> app.inspector.buildFullSnapshotMarkdown()
+            1 -> app.inspector.buildFileTreeMarkdown()
+            2 -> app.inspector.buildActiveFileAndErrorsMarkdown()
+            else -> app.inspector.buildSettingsAndStatusMarkdown()
+        }
+    }
+
+    fun copyToClipboard(label: String, text: String) {
+        if (text.isBlank()) { showToast("Nothing to copy"); return }
+        app.mediaExport.copyToClipboard(label, text)
+        showToast("Copied $label")
+    }
+
+    fun copyErrorSummary() {
+        val ex = executionState.value
+        val report = buildString {
+            appendLine("=== ATELIER ERROR LOG ===")
+            appendLine("File : ${_activeFile.value?.relativePath ?: "none"}")
+            appendLine("Mode : ${ex.modeLabel}")
+            appendLine("Exit : ${ex.lastExitCode ?: "n/a"} ${ex.lastExitCode?.let { "(${decodeExitSignal(it)})" } ?: ""}")
+            if (ex.diagnostics.isNotEmpty()) {
+                appendLine("\n--- Diagnostics ---")
+                ex.diagnostics.forEach { d -> appendLine("[${d.severity}] ${d.source} L${d.line}: ${d.message}") }
+            }
+            val tail = app.coordinator.getConsoleTail(90)
+            if (tail.isNotBlank()) {
+                appendLine("\n--- Console Tail ---")
+                appendLine(tail)
+            }
+        }
+        copyToClipboard("Error Log", report)
+    }
+
+    fun copyFullConsoleLog() = copyToClipboard("Console Log", consoleLog.value.ifBlank { app.coordinator.getConsoleTail(400) })
+
+    fun copyDiagnosticsList() {
+        val list = executionState.value.diagnostics
+        if (list.isEmpty()) { showToast("No issues to copy"); return }
+        val text = list.joinToString("\n") { "[${it.severity}] ${it.source} L${it.line}: ${it.message}" }
+        copyToClipboard("Issues", text)
+    }
+
+    fun exportTextToDocs(baseTitle: String, content: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = app.mediaExport.saveTextDocumentToStorage(content, baseTitle, "Snapshots")
+            showToast(if (res.success) "Saved to ${res.displayLocation}" else res.error)
+        }
+    }
+
+    fun readCrashReport(entry: CrashReportEntry): String = app.crashReporter.readReportBody(entry)
+    fun dismissPendingCrashAlert() = app.crashReporter.dismissPendingAlert()
+    fun clearAllCrashReports() = app.crashReporter.clearAllReports()
+
     fun evaluateRepl(code: String) {
         if (code.isBlank() || _replBusy.value) return
-        if (runtimeState.value !is RuntimeState.Ready) {
-            showToast("Install runtime first to use REPL.")
-            return
-        }
+        if (runtimeState.value !is RuntimeState.Ready) { showToast("Install runtime first to use REPL."); return }
         viewModelScope.launch {
             _replBusy.value = true
             val res = app.coordinator.replSession.evaluate(code)
-            val entry = ReplEntry(
-                id = replSeq++,
-                input = code,
-                stdout = res.stdout.trimEnd(),
-                stderr = res.stderr.trimEnd(),
-                latex = res.latex,
-                imagePath = res.hostImagePath,
-                ok = res.ok
-            )
+            val entry = ReplEntry(replSeq++, code, res.stdout.trimEnd(), res.stderr.trimEnd(), res.latex, res.hostImagePath, res.ok)
             _replEntries.value = (_replEntries.value + entry).takeLast(60)
             _replVars.value = res.vars
             if (res.hostImagePath.isNotBlank() && File(res.hostImagePath).exists()) {
                 app.coordinator.setPreviewArtifact(
-                    OutputArtifact(
-                        path = res.hostImagePath,
-                        kind = OutputKind.IMAGE,
-                        title = "REPL Figure",
-                        telemetry = VideoTelemetry(sizeBytes = File(res.hostImagePath).length()),
-                        timestamp = System.currentTimeMillis()
-                    )
+                    OutputArtifact(res.hostImagePath, OutputKind.IMAGE, "REPL Figure", VideoTelemetry(sizeBytes = File(res.hostImagePath).length()), timestamp = System.currentTimeMillis())
                 )
             }
             _replBusy.value = false
@@ -347,10 +410,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
 
     fun saveActiveArtifactToStorage() {
         val art = executionState.value.activeArtifact
-        if (art.path.isBlank() || !File(art.path).exists()) {
-            showToast("No rendered output to save.")
-            return
-        }
+        if (art.path.isBlank() || !File(art.path).exists()) { showToast("No rendered output to save."); return }
         viewModelScope.launch(Dispatchers.IO) {
             val file = File(art.path)
             val res = when (art.kind) {
@@ -366,38 +426,22 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     fun shareActiveArtifact(activityContext: Context) {
         val art = executionState.value.activeArtifact
         if (art.path.isBlank() || !File(art.path).exists()) return
-        val mime = when (art.kind) {
-            OutputKind.VIDEO -> "video/*"
-            OutputKind.IMAGE -> "image/*"
-            OutputKind.PDF -> "application/pdf"
-            OutputKind.NONE -> "*/*"
-        }
+        val mime = when (art.kind) { OutputKind.VIDEO -> "video/*"; OutputKind.IMAGE -> "image/*"; OutputKind.PDF -> "application/pdf"; OutputKind.NONE -> "*/*" }
         app.mediaExport.shareFile(activityContext, File(art.path), mime)
     }
 
-    fun selectScene(scene: String) { _selectedScene.value = scene }
-    fun selectPreset(p: ManimPreset) { _preset.value = p }
-    fun selectOutputFormat(f: OutputFormat) { _outputFormat.value = f }
-    fun setCustomDimensions(w: Int, h: Int, fps: Int) {
-        _customWidth.value = w.coerceIn(160, 4096)
-        _customHeight.value = h.coerceIn(160, 4096)
-        _customFps.value = fps.coerceIn(1, 120)
-    }
-    fun setDisableCache(v: Boolean) { _disableCache.value = v }
-    fun setAutoSaveStorage(v: Boolean) {
-        _autoSaveStorage.value = v
-        prefs.edit().putBoolean("auto_save_storage", v).apply()
-    }
-    fun toggleTheme() {
-        val next = !_isDarkTheme.value
-        _isDarkTheme.value = next
-        prefs.edit().putBoolean("dark_theme", next).apply()
-    }
-    fun setFontSize(sp: Int) {
-        val clamped = sp.coerceIn(10, 22)
-        _fontSizeSp.value = clamped
-        prefs.edit().putInt("editor_font_sp", clamped).apply()
-    }
+    fun selectScene(scene: String) = settings.selectScene(scene)
+    fun selectPreset(p: ManimPreset) = settings.selectPreset(p)
+    fun selectOutputFormat(f: OutputFormat) = settings.selectOutputFormat(f)
+    fun setCustomDimensions(w: Int, h: Int, fps: Int) = settings.setCustomDimensions(w, h, fps)
+    fun selectRenderMode(m: ManimRenderMode) = settings.selectRenderMode(m)
+    fun setAnimRange(start: Int, end: Int) = settings.setAnimRange(start, end)
+    fun setDisableCache(v: Boolean) = settings.setDisableCache(v)
+    fun setAutoSaveStorage(v: Boolean) = settings.setAutoSaveStorage(v)
+    fun setAutoExportCrashReports(v: Boolean) = settings.setAutoExportCrashReports(v)
+    fun toggleTheme() = settings.toggleTheme()
+    fun setFontSize(sp: Int) = settings.setFontSize(sp)
+    fun setComputeProfile(p: ComputeProfile) = settings.setComputeProfile(p)
 
     fun startRuntimeInstall() = app.runtimeManager.startInstall()
     fun cancelRuntimeInstall() = app.runtimeManager.cancelInstall()
@@ -405,10 +449,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     fun reinstallRuntime() = app.runtimeManager.reinstallRuntime()
     fun setUseNoSeccomp(v: Boolean) { app.runtimeManager.useNoSeccomp = v }
     fun getUseNoSeccomp(): Boolean = app.runtimeManager.useNoSeccomp
-    fun setCustomManifestUrl(url: String) {
-        app.runtimeManager.customManifestUrl = url
-        app.runtimeManager.refreshState()
-    }
+    fun setCustomManifestUrl(url: String) { app.runtimeManager.customManifestUrl = url; app.runtimeManager.refreshState() }
     fun getActiveManifestUrl(): String = app.runtimeManager.activeManifestUrl()
     fun clearManimCache() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -425,17 +466,30 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun syncInspectorLiveState() {
+        val f = _activeFile.value
+        val v = _editorValue.value
+        val pos = min(v.selection.start, v.text.length)
+        val cursorLine = v.text.substring(0, pos).count { it == '\n' } + 1
+        app.inspector.activeFileName = f?.name ?: ""
+        app.inspector.activeFilePath = f?.relativePath ?: ""
+        app.inspector.activeFileLanguage = f?.language ?: ""
+        app.inspector.activeFileDirty = _isDirty.value
+        app.inspector.activeEditorText = v.text
+        app.inspector.activeCursorLine = cursorLine
+        app.inspector.activeDetectedScenes = _detectedScenes.value
+        app.crashReporter.activeFilePath = f?.relativePath ?: ""
+    }
+
     private fun refreshDetectedScenes(code: String, language: String) {
         if (language == "LATEX") {
             _detectedScenes.value = emptyList()
-            _selectedScene.value = ""
+            settings.selectScene("")
             return
         }
         val found = detectManimScenes(code)
         _detectedScenes.value = found
-        if (_selectedScene.value !in found) {
-            _selectedScene.value = found.firstOrNull() ?: ""
-        }
+        if (settings.selectedScene.value !in found) settings.selectScene(found.firstOrNull() ?: "")
     }
 
     private fun scheduleAutosave() {
@@ -456,6 +510,26 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     private fun updateUndoFlags() {
         _canUndo.value = undoStack.isNotEmpty()
         _canRedo.value = redoStack.isNotEmpty()
+    }
+
+    private fun probeVideoLight(file: File): VideoTelemetry {
+        val mmr = MediaMetadataRetriever()
+        return try {
+            mmr.setDataSource(file.absolutePath)
+            val w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            val dur = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            var fps = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toDoubleOrNull() ?: 0.0
+            if (fps <= 0.0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && dur > 0L) {
+                val frames = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toLongOrNull() ?: 0L
+                if (frames > 0L) fps = frames * 1000.0 / dur.toDouble()
+            }
+            VideoTelemetry(w, h, if (fps > 0.0) fps else 30.0, dur, "H264", file.length())
+        } catch (_: Throwable) {
+            VideoTelemetry(sizeBytes = file.length())
+        } finally {
+            runCatching { mmr.release() }
+        }
     }
 
     override fun onCleared() {

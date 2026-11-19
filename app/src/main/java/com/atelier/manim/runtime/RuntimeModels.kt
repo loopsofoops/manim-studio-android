@@ -172,18 +172,60 @@ enum class OutputFormat(val label: String, val ext: String) {
     WEBM_ALPHA("Transparent WebM", "webm")
 }
 
+enum class ManimRenderMode(val label: String, val shortLabel: String) {
+    FULL("Full Scene", "Full"),
+    DRAFT("Fast Draft (480p15)", "Draft"),
+    STILL("Last Frame PNG (-s)", "Still"),
+    RANGE("Animation Range (-n)", "Range")
+}
+
+enum class ComputeProfile(val label: String, val shortLabel: String, val threads: Int) {
+    ECO_2T("Eco (2 Threads)", "2T", 2),
+    BALANCED_4T("Balanced (4 Threads)", "4T", 4),
+    MAX_6T("Max (6 Threads)", "6T", 6)
+}
+
+data class CrashReportEntry(
+    val id: String,
+    val fileName: String,
+    val filePath: String,
+    val kind: String,
+    val title: String,
+    val summary: String,
+    val timestampMs: Long,
+    val exportedLocation: String = ""
+)
+
+fun decodeExitSignal(exitCode: Int): String = when (exitCode) {
+    0 -> "OK"
+    1 -> "General Error"
+    2 -> "Usage / Syntax Error"
+    124 -> "Timed Out"
+    126 -> "Permission Denied"
+    127 -> "Command Not Found"
+    130 -> "SIGINT (Interrupted)"
+    134 -> "SIGABRT (Aborted)"
+    135 -> "SIGBUS (Bus Error)"
+    137 -> "SIGKILL (Likely Out of Memory / LMK)"
+    139 -> "SIGSEGV (Segmentation Fault)"
+    143 -> "SIGTERM (Terminated)"
+    else -> if (exitCode > 128) "Signal ${exitCode - 128}" else "Exit $exitCode"
+}
+
 data class ExecutionState(
     val isRunning: Boolean = false,
     val modeLabel: String = "",
     val stageLabel: String = "",
     val progress: Float = -1f,
-    val consoleLog: String = "",
     val compilerReport: String = "",
     val diagnostics: List<DiagnosticItem> = emptyList(),
     val lastExitCode: Int? = null,
     val elapsedMs: Long = 0L,
     val activeArtifact: OutputArtifact = OutputArtifact(),
-    val bannerMessage: String = ""
+    val bannerMessage: String = "",
+    val bannerIsError: Boolean = false,
+    val lastErrorSummary: String = "",
+    val lastCrashReportPath: String = ""
 )
 
 data class ReplVar(val name: String, val type: String, val valueRepr: String)
