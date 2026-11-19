@@ -319,7 +319,7 @@ class WorkspaceRepository(
     suspend fun createFolder(rawPath: String): File = withContext(Dispatchers.IO) {
         val clean = rawPath.trim().removePrefix("/workspace/").trim('/')
             .split('/').filter { it.isNotBlank() && it != "." && it != ".." }
-            .joinToString("/") { it.replace(Regex("[:*?"<>|\s]+"), "_") }
+            .joinToString("/") { it.replace(Regex("[:*?\"<>|\\s]+"), "_") }
         if (clean.isEmpty()) error("Invalid folder path")
         File(workspaceDir, clean).apply { mkdirs() }
     }

@@ -651,7 +651,7 @@ class ExecutionCoordinator(
         val startMs = System.currentTimeMillis()
         workspaceRepo.saveFile(file, code, label = "AI TeX", triggerType = "AI_CTRL")
         val texOutDir = File(runtimeManager.outputsDir, "tex").apply { mkdirs() }
-        val cmd = listOf("/bin/bash", "-lc", "pdflatex -interaction=nonstopmode -file-line-error -output-directory=/outputs/tex "/workspace/${file.relativePath}" && pdflatex -interaction=nonstopmode -file-line-error -output-directory=/outputs/tex "/workspace/${file.relativePath}"")
+        val cmd = listOf("/bin/bash", "-lc", "pdflatex -interaction=nonstopmode -file-line-error -output-directory=/outputs/tex '/workspace/${file.relativePath}' && pdflatex -interaction=nonstopmode -file-line-error -output-directory=/outputs/tex '/workspace/${file.relativePath}'")
         val (exitCode, fullLog) = runBridgeSubProcess(cmd)
         val elapsed = System.currentTimeMillis() - startMs
         val pdf = File(texOutDir, "${file.name.substringBeforeLast('.')}.pdf")
@@ -683,7 +683,7 @@ class ExecutionCoordinator(
 
     fun runPipBlockingForBridge(action: String, pkgSpec: String): JSONObject {
         val cmd = if (action == "install") {
-            listOf("/opt/atelier-venv/bin/pip", "install", "--target", "/user-site", "--upgrade", "--prefer-binary") + pkgSpec.split(Regex("\s+")).filter { it.isNotBlank() }
+            listOf("/opt/atelier-venv/bin/pip", "install", "--target", "/user-site", "--upgrade", "--prefer-binary") + pkgSpec.split(Regex("\\s+")).filter { it.isNotBlank() }
         } else listOf("/opt/atelier-venv/bin/pip", "list")
         val (exitCode, out) = runBridgeSubProcess(cmd)
         return JSONObject().put("exitCode", exitCode).put("output", out.takeLast(8000))
