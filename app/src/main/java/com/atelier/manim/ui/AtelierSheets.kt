@@ -56,6 +56,7 @@ import com.atelier.manim.data.ProjectFileEntity
 import com.atelier.manim.runtime.ComputeProfile
 import com.atelier.manim.runtime.DiagnosticItem
 import com.atelier.manim.runtime.VoiceDownloadState
+import com.atelier.manim.runtime.VoiceEngineKind
 import com.atelier.manim.runtime.VoiceModelSpec
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
@@ -852,6 +853,9 @@ fun SettingsSheet(
     onFontSize: (Int) -> Unit,
     onToggleNoSeccomp: (Boolean) -> Unit,
     onClearManimCache: () -> Unit,
+    onOpenBrandKit: () -> Unit,
+    onOpenGitPanel: () -> Unit,
+    onOpenBatchQueue: () -> Unit,
     onOpenInspector: () -> Unit,
     onOpenRuntimeSetup: () -> Unit,
     onReinstallRuntime: () -> Unit,
@@ -967,7 +971,9 @@ fun SettingsSheet(
                         Text(vm.description, color = colors.textSecondary, fontSize = 11.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 3.dp)) {
                             if (installed) {
-                                PillChip("Test Voice", true) { onTestVoice(vm.id) }
+                                val isAsr = vm.kind == VoiceEngineKind.ASR_ZIPFORMER || vm.kind == VoiceEngineKind.ASR_SENSEVOICE
+                                if (isAsr) PillChip("Aligner Ready", true) { }
+                                else PillChip("Test Voice", true) { onTestVoice(vm.id) }
                                 PillChip("Remove", false) { onDeleteVoice(vm.id) }
                             } else {
                                 PillChip(if (busy) "Busy..." else "Download", !busy) { if (!busy) onInstallVoice(vm.id) }
@@ -975,6 +981,14 @@ fun SettingsSheet(
                         }
                     }
                 }
+            }
+
+            HorizontalDivider(color = colors.hairline)
+            SectionTitle("Pro Studio Tools")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                PillChip("Brand Kit & Blueprint", true) { onDismiss(); onOpenBrandKit() }
+                PillChip("Git Panel", false) { onDismiss(); onOpenGitPanel() }
+                PillChip("Batch Queue", false) { onDismiss(); onOpenBatchQueue() }
             }
 
             HorizontalDivider(color = colors.hairline)

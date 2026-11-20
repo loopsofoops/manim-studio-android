@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -37,6 +39,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import java.util.Locale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,7 +59,8 @@ import com.atelier.manim.ui.theme.LocalAtelierColors
 fun AtelierMainScreen(
     viewModel: AtelierViewModel,
     onImportFiles: () -> Unit,
-    onExportWorkspaceZip: () -> Unit
+    onExportWorkspaceZip: () -> Unit,
+    onRequestRecordAudio: ((Boolean) -> Unit) -> Unit = { it(false) }
 ) {
     val colors = LocalAtelierColors.current
     val context = LocalContext.current
@@ -96,6 +101,25 @@ fun AtelierMainScreen(
     val latestManifestPath by viewModel.latestManifestPath.collectAsState()
     val musicFiles by viewModel.musicFiles.collectAsState()
     val sfxFiles by viewModel.sfxFiles.collectAsState()
+    val voiceBusy by viewModel.voiceBusy.collectAsState()
+    val isRecordingRef by viewModel.isRecordingRef.collectAsState()
+    val cloneRefWavPath by viewModel.cloneRefWavPath.collectAsState()
+    val telemetry by viewModel.telemetry.collectAsState()
+    val brandKit by viewModel.brandKit.collectAsState()
+    val batchQueue by viewModel.batchQueue.collectAsState()
+    val batchRunning by viewModel.batchRunning.collectAsState()
+    val thermalPaused by viewModel.thermalPaused.collectAsState()
+    val timelineUi by viewModel.timelineUi.collectAsState()
+    val availableTimelines by viewModel.availableTimelines.collectAsState()
+    val voiceWaveformPeaks by viewModel.voiceWaveformPeaks.collectAsState()
+    val pacingReport by viewModel.pacingReport.collectAsState()
+    val latestThumbPath by viewModel.latestThumbnailHostPath.collectAsState()
+    val formulaInitial by viewModel.formulaInitial.collectAsState()
+    val formulaPreviewPath by viewModel.formulaPreviewPath.collectAsState()
+    val formulaPreviewError by viewModel.formulaPreviewError.collectAsState()
+    val formulaBusy by viewModel.formulaBusy.collectAsState()
+    val gitOutput by viewModel.gitOutput.collectAsState()
+    val gitBusy by viewModel.gitBusy.collectAsState()
     val isDark by viewModel.isDarkTheme.collectAsState()
     val fontSizeSp by viewModel.fontSizeSp.collectAsState()
     val replEntries by viewModel.replEntries.collectAsState()
@@ -115,7 +139,14 @@ fun AtelierMainScreen(
     var showInspectorSheet by remember { mutableStateOf(false) }
     var inspectorInitialTab by remember { mutableIntStateOf(0) }
     var showRangeDialog by remember { mutableStateOf(false) }
+    var showOutlineSheet by remember { mutableStateOf(false) }
+    var showFormulaDialog by remember { mutableStateOf(false) }
+    var showGitSheet by remember { mutableStateOf(false) }
+    var showBatchSheet by remember { mutableStateOf(false) }
+    var showBrandSheet by remember { mutableStateOf(false) }
+    var showDubDialog by remember { mutableStateOf(false) }
     var jumpToLine by remember { mutableStateOf<Int?>(null) }
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
     LaunchedEffect(execution.activeArtifact.timestamp) {
         if (execution.activeArtifact.kind != OutputKind.NONE) showStage = true
@@ -159,6 +190,17 @@ fun AtelierMainScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    val tempWarn = telemetry.batteryTempC >= 39f || telemetry.ramAvailMb in 1L..900L
+                    val tempHot = telemetry.batteryTempC >= 42f
+                    Text(
+                        text = String.format(Locale.US, "%.0fC", telemetry.batteryTempC),
+                        color = when { tempHot -> colors.error; tempWarn -> colors.warning; else -> colors.textMuted },
+                        fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .background(if (batchRunning || thermalPaused) colors.surfaceElevated else Color.Transparent)
+                            .clickable { showBatchSheet = true }.padding(horizontal = 5.dp, vertical = 4.dp)
+                    )
+                    TopIconBtn(AtelierIcons.GitBranch, active = false) { showGitSheet = true }
                     TopIconBtn(AtelierIcons.StageToggle, active = showStage) {
                         if (stageExpanded) stageExpanded = false else showStage = !showStage
                     }
@@ -188,9 +230,9 @@ fun AtelierMainScreen(
                                 when {
                                     execution.isRunning -> viewModel.cancelExecution()
                                     !isReady -> showRuntimeSheet = true
-                                    studioMode == StudioMode.CONTROL -> {
-                                        viewModel.runControllerScript()
-                                    }
+                                    studioMode == StudioMode.CONTROL -> viewModel.runControllerScript()
+                                    studioMode == StudioMode.EDIT -> viewModel.exportCurrentTimeline(timelineUi.preset, hardwareFast = false, fullPublishBundle = false)
+                                    studioMode == StudioMode.AUDIO -> viewModel.muxActiveVideoWithAudio(musicFiles.firstOrNull()?.let { "/outputs/audio/music/${it.name}" } ?: "", false)
                                     else -> {
                                         showStage = true
                                         viewModel.runPrimaryAction()
@@ -211,6 +253,8 @@ fun AtelierMainScreen(
                             execution.isRunning -> "Stop"
                             !isReady -> "Setup"
                             studioMode == StudioMode.CONTROL -> "Exec"
+                            studioMode == StudioMode.EDIT -> "Export"
+                            studioMode == StudioMode.AUDIO -> "Mix"
                             activeFile?.language == "LATEX" -> "Build"
                             detectedScenes.isNotEmpty() -> "Render"
                             else -> "Run"
@@ -288,6 +332,33 @@ fun AtelierMainScreen(
                     onOpenRuntimeSetup = { showRuntimeSheet = true },
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 )
+            } else if (studioMode == StudioMode.EDIT) {
+                EditStudioWorkspace(
+                    execution = execution,
+                    timeline = timelineUi,
+                    availableTimelines = availableTimelines,
+                    voiceWaveformPeaks = voiceWaveformPeaks,
+                    pacingReport = pacingReport,
+                    latestThumbnailHostPath = latestThumbPath,
+                    guestToHost = { viewModel.guestToHostFile(it) },
+                    onSelectTimeline = { viewModel.selectTimeline(it) },
+                    onCreateTimeline = { viewModel.createTimelineProject(it) },
+                    onAddActiveRenderClip = { viewModel.addActiveRenderToTimeline() },
+                    onImportVoiceManifest = { viewModel.importVoiceManifestToTimeline() },
+                    onAddLatestMusic = { viewModel.addLatestMusicToTimeline() },
+                    onSplitVideoAt = { viewModel.splitVideoClipAt(it) },
+                    onUpdateVideoClip = { idx, t0, t1, sp, frz, tr, z0, z1 -> viewModel.updateVideoClip(idx, t0, t1, sp, frz, tr, z0, z1) },
+                    onDeleteVideoClip = { viewModel.deleteVideoClip(it) },
+                    onSetCaptionStyle = { viewModel.setTimelineCaptionStyle(it) },
+                    onAddChapterAt = { t, title -> viewModel.addTimelineChapter(t, title) },
+                    onRunPacingScan = { viewModel.runPacingScan() },
+                    onAutoTrimDeadAir = { viewModel.autoTrimTimelineDeadAir() },
+                    onGenerateThumbnail = { t, ti, sub, m -> viewModel.generateThumbnail(t, ti, sub, m) },
+                    onExportTimeline = { p, hw, bundle -> viewModel.exportCurrentTimeline(p, hw, bundle) },
+                    onEnqueueBatchExport = { viewModel.enqueueActiveTimelineBatch(it) },
+                    onOpenDubbingDialog = { showDubDialog = true },
+                    modifier = Modifier.weight(1f).fillMaxWidth()
+                )
             } else if (studioMode == StudioMode.AUDIO) {
                 val activeVidTitle = if (execution.activeArtifact.kind == OutputKind.VIDEO) execution.activeArtifact.title else ""
                 AudioStudioWorkspace(
@@ -297,14 +368,25 @@ fun AtelierMainScreen(
                     scriptText = audioScriptText,
                     normalizedPreview = remember(audioScriptText) { viewModel.normalizeMathPreviewLine() },
                     voiceStatusSummary = voiceStudioSummary,
+                    voiceBusy = voiceBusy,
+                    isRecordingRef = isRecordingRef,
+                    cloneRefWavPath = cloneRefWavPath,
                     generatedMusicFiles = musicFiles,
                     generatedSfxFiles = sfxFiles,
                     latestManifestPath = latestManifestPath,
                     activeVideoTitle = activeVidTitle,
                     onScriptChange = { viewModel.onAudioScriptChange(it) },
-                    onSynthesizeScript = { m, sid, sp -> viewModel.synthesizeAudioStudioScript(m, sid, sp) },
-                    onTestSingleLine = { m, sid, sp -> viewModel.previewAudioScriptLine1(m, sid, sp) },
+                    onSynthesizeScript = { m, sid, sp, lg -> viewModel.synthesizeAudioStudioScript(m, sid, sp, lg) },
+                    onTestSingleLine = { m, sid, sp, lg -> viewModel.previewAudioScriptLine1(m, sid, sp, lg) },
+                    onToggleRecordCloneSample = {
+                        if (isRecordingRef) viewModel.toggleRecordCloneSample(true)
+                        else onRequestRecordAudio { granted -> viewModel.toggleRecordCloneSample(granted) }
+                    },
+                    onDenoiseCloneSample = { viewModel.denoiseCloneSample() },
+                    onRunForcedAlignment = { viewModel.runForcedAlignmentOnLatestVoice() },
                     onComposeMusic = { st, k, sc, bpm, dur, arc -> viewModel.composeBackgroundMusic(st, k, sc, bpm, dur, arc) },
+                    onInstallStableAudio = { v, tok -> viewModel.installStableAudioPack(v, tok) },
+                    onGenerateStableAudio = { p, s, v -> viewModel.generateStableAudioTrack(p, s, v) },
                     onGenerateSfx = { viewModel.generateMathSfx(it) },
                     onPlayAudioFile = { viewModel.playHostAudioFile(it) },
                     onMuxWithActiveVideo = { bgm, shorts -> viewModel.muxActiveVideoWithAudio(bgm, shorts) },
@@ -385,38 +467,45 @@ fun AtelierMainScreen(
                     onUndo = { viewModel.undo() },
                     onRedo = { viewModel.redo() },
                     onJumpHandled = { jumpToLine = null },
+                    onOpenOutline = { showOutlineSheet = true },
+                    onPreviewFormula = { viewModel.openFormulaPreviewFromCursor(); showFormulaDialog = true },
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 )
             }
             }
 
-            // Minimalist Studio Mode Switcher (Code | Control)
-            HorizontalDivider(thickness = 1.dp, color = colors.hairline)
-            Row(
-                modifier = Modifier.fillMaxWidth().height(38.dp).background(colors.surface).padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                StudioMode.entries.forEach { mode ->
-                    val selected = studioMode == mode
-                    Box(
-                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(7.dp))
-                            .background(if (selected) colors.surfaceElevated else Color.Transparent)
-                            .border(1.dp, if (selected) colors.accent.copy(alpha = 0.65f) else Color.Transparent, RoundedCornerShape(7.dp))
-                            .clickable { viewModel.setStudioMode(mode) }
-                            .padding(vertical = 5.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = when (mode) {
-                                StudioMode.CODE -> "Code"
-                                StudioMode.AUDIO -> "Audio"
-                                StudioMode.CONTROL -> "AI Control"
-                            },
-                            color = if (selected) colors.textPrimary else colors.textSecondary,
-                            fontSize = 11.sp,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
-                        )
+            if (!imeVisible) {
+                HorizontalDivider(thickness = 1.dp, color = colors.hairline)
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(38.dp).background(colors.surface).padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    StudioMode.entries.forEach { mode ->
+                        val selected = studioMode == mode
+                        Box(
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(7.dp))
+                                .background(if (selected) colors.surfaceElevated else Color.Transparent)
+                                .border(1.dp, if (selected) colors.accent.copy(alpha = 0.65f) else Color.Transparent, RoundedCornerShape(7.dp))
+                                .clickable {
+                                    if (mode == StudioMode.EDIT) viewModel.refreshTimelines()
+                                    viewModel.setStudioMode(mode)
+                                }
+                                .padding(vertical = 5.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = when (mode) {
+                                    StudioMode.CODE -> "Code"
+                                    StudioMode.EDIT -> "Edit"
+                                    StudioMode.AUDIO -> "Audio"
+                                    StudioMode.CONTROL -> "Control"
+                                },
+                                color = if (selected) colors.textPrimary else colors.textSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        }
                     }
                 }
             }
@@ -580,10 +669,78 @@ fun AtelierMainScreen(
             onFontSize = { viewModel.setFontSize(it) },
             onToggleNoSeccomp = { viewModel.setUseNoSeccomp(it) },
             onClearManimCache = { viewModel.clearManimCache() },
+            onOpenBrandKit = { showBrandSheet = true },
+            onOpenGitPanel = { showGitSheet = true },
+            onOpenBatchQueue = { showBatchSheet = true },
             onOpenInspector = { inspectorInitialTab = 0; showInspectorSheet = true },
             onOpenRuntimeSetup = { showRuntimeSheet = true },
             onReinstallRuntime = { viewModel.reinstallRuntime(); showRuntimeSheet = true },
             onDismiss = { showSettingsSheet = false }
+        )
+    }
+
+    if (showOutlineSheet) {
+        SymbolOutlineSheet(
+            code = editorValue.text,
+            language = activeFile?.language ?: "PYTHON_MANIM",
+            onJumpToLine = { jumpToLine = it },
+            onDismiss = { showOutlineSheet = false }
+        )
+    }
+
+    if (showFormulaDialog) {
+        FormulaPreviewDialog(
+            initialFormula = formulaInitial,
+            previewHostPath = formulaPreviewPath,
+            errorText = formulaPreviewError,
+            isBusy = formulaBusy,
+            onRenderFormula = { viewModel.renderFormulaPreview(it) },
+            onDismiss = { showFormulaDialog = false }
+        )
+    }
+
+    if (showGitSheet) {
+        GitPanelSheet(
+            gitOutput = gitOutput,
+            gitBusy = gitBusy,
+            onRunGit = { act, a1, a2 -> viewModel.runGitAction(act, a1, a2) },
+            onDismiss = { showGitSheet = false }
+        )
+    }
+
+    if (showBatchSheet) {
+        BatchQueueSheet(
+            telemetry = telemetry,
+            jobs = batchQueue,
+            isRunning = batchRunning,
+            thermalPaused = thermalPaused,
+            onEnqueueActiveScene = { viewModel.enqueueActiveSceneBatch() },
+            onEnqueueActiveTimeline = { viewModel.enqueueActiveTimelineBatch() },
+            onStart = { viewModel.startBatchQueue() },
+            onPause = { viewModel.pauseBatchQueue() },
+            onRemove = { viewModel.removeBatchJob(it) },
+            onClearFinished = { viewModel.clearFinishedBatchJobs() },
+            onDismiss = { showBatchSheet = false }
+        )
+    }
+
+    if (showBrandSheet) {
+        BrandAndBlueprintSheet(
+            brand = brandKit,
+            onSaveBrand = { viewModel.saveBrandKit(it) },
+            onExportThemePy = { viewModel.exportBrandThemeFile() },
+            onBuildBlueprint = { n, md -> viewModel.buildUnifiedBlueprint(n, md) },
+            onDismiss = { showBrandSheet = false }
+        )
+    }
+
+    if (showDubDialog) {
+        MultiLangDubDialog(
+            timelineName = timelineUi.name,
+            voiceCatalog = viewModel.voiceCatalog,
+            installedVoiceIds = installedVoiceIds,
+            onRunDub = { lg, m, txt -> viewModel.dubCurrentTimeline(lg, m, txt) },
+            onDismiss = { showDubDialog = false }
         )
     }
 }

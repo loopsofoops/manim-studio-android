@@ -28,7 +28,8 @@ class StudioInspector(
     private val crashReporter: CrashReporter,
     private val dao: AtelierDao,
     private val bridgePortProvider: () -> Int = { 0 },
-    private val voiceEngine: OfflineVoiceEngine? = null
+    private val voiceEngine: OfflineVoiceEngine? = null,
+    private val automation: StudioAutomationManager? = null
 ) {
     @Volatile var activeFileName: String = ""
     @Volatile var activeFilePath: String = ""
@@ -228,6 +229,10 @@ class StudioInspector(
         put("consoleTail", coordinator.getConsoleTail(80))
         put("crashes", getCrashReportsJson(5, false))
         put("renderHistory", getRenderHistoryJson(10))
+        automation?.let {
+            put("brand", it.brandToJson())
+            put("batchQueue", it.queueToJson())
+        }
     }
 
     fun buildSettingsAndStatusMarkdown(): String {
@@ -369,7 +374,17 @@ class StudioInspector(
         appendLine("- `atelier.audio.mux_video(video_path, voice_clips=[...], sfx_clips=[...], music_clips=[...], target_lufs=-14.0, duck_db=-13.0)`")
         appendLine("\n## Non-Destructive Multi-Track Timeline & YouTube Export")
         appendLine("- `atelier.timeline.create(name, preset='youtube_1080p60')` / `load(name)` / `add_video(...)` / `add_voice(...)` / `import_voice_manifest(name, manifest_path)` / `add_sfx(...)` / `add_music(...)` / `add_caption(...)` / `add_chapter(name, sec, title)`")
-        appendLine("- `atelier.export.presets()` / `render_timeline(name, preset='youtube_1080p60'|'youtube_720p30'|'youtube_4k60'|'shorts_9x16_60'|'square_1x1', target_lufs=-14.0, duck_db=-13.0)` -> MP4 + .srt + chapters.txt")
+        appendLine("- `atelier.export.presets()` / `render_timeline(...)` / `publish_bundle(name, include_short=True)` / `hardware_transcode(in_path, out_path, width, height)`")
+        appendLine("\n## Phase 4 Pro Studio APIs (Cloning, Alignment, Stable Audio 3, Thumbnails, Pacing, Dubbing, Brand, Batch, Git)")
+        appendLine("- `atelier.voice.clone_say(text, ref_wav='')` / `align(wav_path)` / `denoise(in_wav)` / `asr_models()`")
+        appendLine("- `atelier.neural_audio.status()` / `install('sm-music'|'sm-sfx', hf_token='')` / `generate_music(prompt, seconds=30)` / `generate_sfx(prompt, seconds=4)`")
+        appendLine("- `atelier.timeline.list()` / `add_overlay(name, image_path, start, end)` / `set_caption_style(name, 'minimal_3b1b'|'highlighted_shorts'|'academic_box'|'none')`")
+        appendLine("- `atelier.thumbnail.create(video_path, time_sec, title, subtitle, math_tex)`")
+        appendLine("- `atelier.pacing.analyze(video_path)` / `auto_trim_dead_air(timeline_name)`")
+        appendLine("- `atelier.blueprint.build(markdown_text, timeline_name)` / `atelier.dub.timeline(src, target_lang, translated_lines, voice_model)`")
+        appendLine("- `atelier.brand.get()` / `set(...)` / `export_theme('atelier_theme.py')`")
+        appendLine("- `atelier.batch.list()` / `enqueue(kind, title, target, extra)` / `start()` / `pause()` / `clear()`")
+        appendLine("- `atelier.git.init()` / `status()` / `diff()` / `log()` / `commit_all(msg)` / `run([...])`")
         appendLine("\n## App, Clipboard, Macros & Rollback")
         appendLine("- `atelier.app.switch_mode('CODE'|'CONTROL')` / `toast(msg)` / `notify(title, msg, copy_text='')`")
         appendLine("- `atelier.app.clipboard_set(text)` / `clipboard_get()` / `export_artifact()`")

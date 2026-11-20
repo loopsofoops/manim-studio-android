@@ -242,4 +242,30 @@ object AtelierIcons {
             moveTo(9f, 5.5f); lineTo(6f, 5.5f); lineTo(6f, 20f); lineTo(18f, 20f); lineTo(18f, 5.5f); lineTo(15f, 5.5f)
         }
     }
+
+    val Outline by lazy {
+        icon("Outline") {
+            moveTo(4f, 6f); lineTo(20f, 6f)
+            moveTo(8f, 12f); lineTo(20f, 12f)
+            moveTo(11f, 18f); lineTo(20f, 18f)
+            moveTo(4f, 12f); lineTo(5f, 12f)
+            moveTo(4f, 18f); lineTo(8f, 18f)
+        }
+    }
+
+    val Formula by lazy {
+        icon("Formula") {
+            moveTo(18f, 5f); lineTo(7f, 5f); lineTo(13.5f, 12f); lineTo(7f, 19f); lineTo(18f, 19f)
+        }
+    }
+
+    val GitBranch by lazy {
+        icon("GitBranch") {
+            moveTo(7f, 6f); lineTo(7f, 18f)
+            moveTo(17f, 8f); lineTo(17f, 11f); lineTo(7f, 15f)
+            moveTo(7f, 4f); arcTo(2f, 2f, 0f, true, true, 6.99f, 4f)
+            moveTo(17f, 4f); arcTo(2f, 2f, 0f, true, true, 16.99f, 4f)
+            moveTo(7f, 17f); arcTo(2f, 2f, 0f, true, true, 6.99f, 17f)
+        }
+    }
 }

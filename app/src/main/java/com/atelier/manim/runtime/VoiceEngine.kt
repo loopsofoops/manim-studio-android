@@ -2,12 +2,24 @@ package com.atelier.manim.runtime
 
 import android.content.Context
 import android.media.MediaPlayer
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.GenerationConfig
+import com.k2fsa.sherpa.onnx.OfflineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizer
+import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsPocketModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsSupertonicModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineZipformerCtcModelConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +51,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-enum class VoiceEngineKind { KOKORO, KITTEN, VITS_PIPER }
+enum class VoiceEngineKind { KOKORO, KITTEN, VITS_PIPER, POCKET, SUPERTONIC, ASR_ZIPFORMER, ASR_SENSEVOICE }
 
 data class VoiceModelSpec(
     val id: String,
@@ -162,6 +174,57 @@ class OfflineVoiceEngine(
             modelFileName = "hi_IN-rohan-medium.onnx",
             defaultSid = 0,
             speakerLabels = listOf("0: Rohan (Hindi Male)")
+        ),
+        VoiceModelSpec(
+            id = "pocket_tts_en",
+            name = "Kyutai Pocket TTS INT8 (5s Voice Clone)",
+            kind = VoiceEngineKind.POCKET,
+            approxSizeLabel = "~98 MB",
+            license = "CC-BY-4.0 / MIT",
+            description = "Zero-shot voice cloning from any 5-second WAV or phone mic clip",
+            archiveUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
+            extractedFolderName = "sherpa-onnx-pocket-tts-int8-2026-01-26",
+            modelFileName = "lm_flow.int8.onnx",
+            tokensFileName = "vocab.json",
+            defaultSid = 0
+        ),
+        VoiceModelSpec(
+            id = "supertonic_3_multi",
+            name = "Supertonic Multi-Lang INT8",
+            kind = VoiceEngineKind.SUPERTONIC,
+            approxSizeLabel = "~140 MB",
+            license = "Open-Weight",
+            description = "Expressive multilingual 44.1 kHz narrator (EN/ES/FR/PT/KO)",
+            archiveUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2",
+            extractedFolderName = "sherpa-onnx-supertonic-tts-int8-2026-03-06",
+            modelFileName = "duration_predictor.int8.onnx",
+            voicesFileName = "voice.bin",
+            tokensFileName = "unicode_indexer.bin",
+            defaultSid = 0
+        ),
+        VoiceModelSpec(
+            id = "asr_zipformer_en",
+            name = "Zipformer CTC EN Aligner (Word Timestamps)",
+            kind = VoiceEngineKind.ASR_ZIPFORMER,
+            approxSizeLabel = "~70 MB",
+            license = "Apache-2.0",
+            description = "Acoustic forced word-level timestamp aligner for English TTS & mic audio",
+            archiveUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ctc-small-en-2023-03-16.tar.bz2",
+            extractedFolderName = "sherpa-onnx-zipformer-ctc-small-en-2023-03-16",
+            modelFileName = "model.int8.onnx",
+            tokensFileName = "tokens.txt"
+        ),
+        VoiceModelSpec(
+            id = "asr_sensevoice_multi",
+            name = "SenseVoice Multi-Lang Aligner (EN/HI/JA/ZH/KO)",
+            kind = VoiceEngineKind.ASR_SENSEVOICE,
+            approxSizeLabel = "~230 MB",
+            license = "MIT",
+            description = "Multilingual acoustic word timestamp aligner & mic transcriber",
+            archiveUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+            extractedFolderName = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+            modelFileName = "model.int8.onnx",
+            tokensFileName = "tokens.txt"
         )
     )
 
@@ -174,8 +237,14 @@ class OfflineVoiceEngine(
     private val ttsLock = Any()
     private var loadedModelId: String = ""
     private var ttsInstance: OfflineTts? = null
+    private val asrLock = Any()
+    private var loadedAsrId: String = ""
+    private var asrInstance: OfflineRecognizer? = null
     private var downloadJob: Job? = null
     private var previewPlayer: MediaPlayer? = null
+    @Volatile private var recordingActive = false
+    private var recordThread: Thread? = null
+    val cloneRefFile: File = File(File(runtimeManager.outputsDir, "audio"), "voice_clone_ref.wav")
 
     init { refreshInstalled() }
 
@@ -192,7 +261,7 @@ class OfflineVoiceEngine(
         if (modelId.isNotBlank()) {
             catalog.firstOrNull { it.id.equals(modelId, true) }?.let { return it }
         }
-        val installed = catalog.firstOrNull { isModelInstalled(it) }
+        val installed = catalog.firstOrNull { isModelInstalled(it) && it.kind != VoiceEngineKind.ASR_ZIPFORMER && it.kind != VoiceEngineKind.ASR_SENSEVOICE }
         return installed ?: catalog.first()
     }
 
@@ -240,6 +309,9 @@ class OfflineVoiceEngine(
         synchronized(ttsLock) {
             if (loadedModelId == modelId) releaseLocked()
         }
+        synchronized(asrLock) {
+            if (loadedAsrId == modelId) releaseAsrLocked()
+        }
         modelDir(spec).deleteRecursively()
         File(dlDir, "${spec.id}.tar.bz2.part").delete()
         refreshInstalled()
@@ -247,6 +319,7 @@ class OfflineVoiceEngine(
 
     fun release() {
         synchronized(ttsLock) { releaseLocked() }
+        synchronized(asrLock) { releaseAsrLocked() }
         runCatching { previewPlayer?.stop(); previewPlayer?.release() }
         previewPlayer = null
     }
@@ -257,11 +330,52 @@ class OfflineVoiceEngine(
             previewPlayer?.release()
             val mp = MediaPlayer()
             mp.setDataSource(hostPath)
+            mp.setOnCompletionListener { player ->
+                runCatching { player.release() }
+                if (previewPlayer === player) previewPlayer = null
+            }
             mp.prepare()
             mp.start()
             previewPlayer = mp
         }
     }
+
+    fun startRecordingCloneReference(onComplete: (File) -> Unit, onError: (String) -> Unit) {
+        if (recordingActive) return
+        recordingActive = true
+        recordThread = Thread {
+            val sr = 24000
+            val minBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(4096)
+            var rec: AudioRecord? = null
+            try {
+                rec = AudioRecord(MediaRecorder.AudioSource.MIC, sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 2)
+                if (rec.state != AudioRecord.STATE_INITIALIZED) error("Microphone unavailable or permission denied.")
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(minBuf)
+                rec.startRecording()
+                val maxEnd = System.currentTimeMillis() + 8000L
+                while (recordingActive && System.currentTimeMillis() < maxEnd) {
+                    val n = rec.read(buf, 0, buf.size)
+                    if (n > 0) out.write(buf, 0, n)
+                }
+                rec.stop()
+                val raw = out.toByteArray()
+                val floats = FloatArray(raw.size / 2)
+                val bb = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in floats.indices) floats[i] = bb.short.toFloat() / 32768f
+                if (floats.size < sr) error("Recording too short — speak for at least 3-5 seconds.")
+                writeNormalizedPcm16Wav(cloneRefFile, floats, sr)
+                onComplete(cloneRefFile)
+            } catch (t: Throwable) {
+                onError(t.message ?: "Mic recording failed")
+            } finally {
+                recordingActive = false
+                runCatching { rec?.release() }
+            }
+        }.apply { isDaemon = true; start() }
+    }
+
+    fun stopRecordingCloneReference() { recordingActive = false }
 
     fun synthesize(
         text: String,
@@ -269,7 +383,9 @@ class OfflineVoiceEngine(
         sid: Int = -1,
         speed: Float = 1.0f,
         normalizeMath: Boolean = true,
-        customOutName: String = ""
+        customOutName: String = "",
+        refWavHostPath: String = "",
+        lang: String = ""
     ): SpeechResult {
         val spec = resolveSpec(modelId)
         if (!isModelInstalled(spec)) {
@@ -277,11 +393,13 @@ class OfflineVoiceEngine(
         }
         val effSid = if (sid >= 0) sid else spec.defaultSid
         val effSpeed = speed.coerceIn(0.5f, 2.0f)
+        val effLang = lang.ifBlank { "en" }
         val spoken = if (normalizeMath) normalizer.normalize(text) else text.trim()
         if (spoken.isBlank()) error("Empty narration text after normalization.")
 
         cacheDir.mkdirs()
-        val key = sha256("${spec.id}|$effSid|${String.format(Locale.US, "%.2f", effSpeed)}|$spoken").take(20)
+        val refTag = if (spec.kind == VoiceEngineKind.POCKET) (refWavHostPath.ifBlank { cloneRefFile.takeIf { it.exists() }?.lastModified()?.toString() ?: "default" }) else ""
+        val key = sha256("${spec.id}|$effSid|$effLang|$refTag|${String.format(Locale.US, "%.2f", effSpeed)}|$spoken").take(20)
         val fileName = if (customOutName.isNotBlank()) {
             val clean = customOutName.replace(Regex("[^A-Za-z0-9._-]"), "_")
             if (clean.endsWith(".wav", true)) clean else "$clean.wav"
@@ -297,7 +415,25 @@ class OfflineVoiceEngine(
 
         val audio = synchronized(ttsLock) {
             val engine = ensureLoadedLocked(spec)
-            engine.generate(text = spoken, sid = effSid, speed = effSpeed)
+            when (spec.kind) {
+                VoiceEngineKind.POCKET -> {
+                    val dir = modelDir(spec)
+                    val refFile = listOfNotNull(
+                        refWavHostPath.takeIf { it.isNotBlank() }?.let { File(it) },
+                        cloneRefFile.takeIf { it.exists() && it.length() > 4096L },
+                        File(dir, "test_wavs/bria.wav").takeIf { it.exists() },
+                        File(dir, "test_wavs/alba.wav").takeIf { it.exists() }
+                    ).firstOrNull { it.exists() } ?: error("No reference WAV found for Pocket TTS voice cloning.")
+                    val (refSamples, refSr) = readWavFloatSamples(refFile)
+                    val cfg = GenerationConfig(speed = effSpeed, referenceAudio = refSamples, referenceSampleRate = refSr, numSteps = 5)
+                    engine.generateWithConfig(text = spoken, config = cfg)
+                }
+                VoiceEngineKind.SUPERTONIC -> {
+                    val cfg = GenerationConfig(sid = effSid, speed = effSpeed, numSteps = 5, extra = mapOf("lang" to effLang))
+                    engine.generateWithConfig(text = spoken, config = cfg)
+                }
+                else -> engine.generate(text = spoken, sid = effSid, speed = effSpeed)
+            }
         }
         if (audio.samples.isEmpty()) error("TTS returned empty audio samples.")
         writeNormalizedPcm16Wav(outFile, audio.samples, audio.sampleRate)
@@ -314,7 +450,9 @@ class OfflineVoiceEngine(
         pauseSec: Double = 0.28,
         normalizeMath: Boolean = true,
         manifestName: String = "timing_manifest.json",
-        srtName: String = "captions.srt"
+        srtName: String = "captions.srt",
+        lang: String = "",
+        refWavHostPath: String = ""
     ): JSONObject {
         val cuesArr = JSONArray()
         val srtSb = StringBuilder()
@@ -324,7 +462,7 @@ class OfflineVoiceEngine(
         lines.forEachIndexed { idx, rawLine ->
             val trimmed = rawLine.trim()
             if (trimmed.isEmpty()) return@forEachIndexed
-            val res = synthesize(trimmed, modelId, sid, speed, normalizeMath)
+            val res = synthesize(trimmed, modelId, sid, speed, normalizeMath, refWavHostPath = refWavHostPath, lang = lang)
             val start = cursorSec
             val end = cursorSec + res.durationSec
             val wordsArr = JSONArray()
@@ -379,6 +517,70 @@ class OfflineVoiceEngine(
         }
     }
 
+    fun asrCatalogJson(): JSONArray = JSONArray().apply {
+        catalog.filter { it.kind == VoiceEngineKind.ASR_ZIPFORMER || it.kind == VoiceEngineKind.ASR_SENSEVOICE }.forEach { spec ->
+            put(JSONObject().put("id", spec.id).put("name", spec.name).put("kind", spec.kind.name).put("size", spec.approxSizeLabel).put("installed", isModelInstalled(spec)))
+        }
+    }
+
+    fun alignWavAudio(wavHostPath: String, asrModelId: String = ""): JSONObject {
+        val file = File(wavHostPath)
+        if (!file.exists()) error("Audio file not found: $wavHostPath")
+        val spec = (if (asrModelId.isNotBlank()) catalog.firstOrNull { it.id.equals(asrModelId, true) } else null)
+            ?: catalog.firstOrNull { (it.kind == VoiceEngineKind.ASR_ZIPFORMER || it.kind == VoiceEngineKind.ASR_SENSEVOICE) && isModelInstalled(it) }
+            ?: error("No ASR aligner installed. Download Zipformer CTC EN or SenseVoice in Settings -> Offline Voice Models.")
+        if (!isModelInstalled(spec)) error("ASR aligner '${spec.id}' is not installed.")
+
+        val (samples, sr) = readWavFloatSamples(file)
+        if (samples.isEmpty()) error("WAV contains no readable PCM16 audio frames.")
+
+        val (text, tokens, stamps) = synchronized(asrLock) {
+            val rec = ensureAsrLoadedLocked(spec)
+            val stream = rec.createStream()
+            try {
+                stream.acceptWaveform(samples, sr)
+                rec.decode(stream)
+                val res = rec.getResult(stream)
+                Triple(res.text.trim(), res.tokens.toList(), res.timestamps.toList())
+            } finally {
+                runCatching { stream.release() }
+            }
+        }
+        val wordsArr = JSONArray()
+        val totalDur = samples.size.toDouble() / max(1, sr).toDouble()
+        if (tokens.isNotEmpty() && stamps.size == tokens.size) {
+            val curWord = StringBuilder()
+            var wStart = -1.0
+            var wEnd = 0.0
+            fun flushWord() {
+                val w = curWord.toString().trim()
+                if (w.isNotEmpty() && wStart >= 0.0) {
+                    wordsArr.put(JSONObject().put("word", w).put("start", round3(wStart)).put("end", round3(max(wStart + 0.06, wEnd))))
+                }
+                curWord.clear(); wStart = -1.0
+            }
+            for (i in tokens.indices) {
+                val tok = tokens[i]
+                val ts = stamps[i].toDouble()
+                val nextTs = if (i + 1 < stamps.size) stamps[i + 1].toDouble() else totalDur
+                val startsNew = tok.startsWith(" ") || tok.startsWith("\u2581")
+                val clean = tok.replace("\u2581", "").trim()
+                if (startsNew) flushWord()
+                if (clean.isNotEmpty()) {
+                    if (wStart < 0.0) wStart = ts
+                    curWord.append(clean)
+                    wEnd = max(ts + 0.05, nextTs)
+                }
+            }
+            flushWord()
+        } else if (text.isNotBlank()) {
+            estimateWordTimestamps(text, totalDur).forEach { w ->
+                wordsArr.put(JSONObject().put("word", w.word).put("start", w.startSec).put("end", w.endSec))
+            }
+        }
+        return JSONObject().put("text", text).put("model", spec.id).put("duration", round3(totalDur)).put("words", wordsArr).put("summary", "${wordsArr.length()} aligned word(s)")
+    }
+
     fun cacheStatsSummary(): String {
         val wavs = cacheDir.listFiles()?.filter { it.isFile && it.name.endsWith(".wav") } ?: emptyList()
         val bytes = wavs.sumOf { it.length() }
@@ -402,6 +604,9 @@ class OfflineVoiceEngine(
         val voicesPath = if (spec.voicesFileName.isNotBlank()) File(dir, spec.voicesFileName).absolutePath else ""
         val threads = settingsStore.computeProfile.value.threads.coerceIn(2, 4)
 
+        fun pickFile(vararg names: String): String =
+            names.map { File(dir, it) }.firstOrNull { it.exists() }?.absolutePath ?: File(dir, names.first()).absolutePath
+
         val modelCfg = when (spec.kind) {
             VoiceEngineKind.KOKORO -> OfflineTtsModelConfig(
                 kokoro = OfflineTtsKokoroModelConfig(
@@ -422,6 +627,32 @@ class OfflineVoiceEngine(
                 ),
                 numThreads = threads, debug = false, provider = "cpu"
             )
+            VoiceEngineKind.POCKET -> OfflineTtsModelConfig(
+                pocket = OfflineTtsPocketModelConfig(
+                    lmFlow = pickFile("lm_flow.int8.onnx", "lm_flow.onnx"),
+                    lmMain = pickFile("lm_main.int8.onnx", "lm_main.onnx"),
+                    encoder = pickFile("encoder.onnx", "encoder.int8.onnx"),
+                    decoder = pickFile("decoder.int8.onnx", "decoder.onnx"),
+                    textConditioner = pickFile("text_conditioner.onnx", "text_conditioner.int8.onnx"),
+                    vocabJson = pickFile("vocab.json"),
+                    tokenScoresJson = pickFile("token_scores.json"),
+                    voiceEmbeddingCacheCapacity = 24
+                ),
+                numThreads = threads, debug = false, provider = "cpu"
+            )
+            VoiceEngineKind.SUPERTONIC -> OfflineTtsModelConfig(
+                supertonic = OfflineTtsSupertonicModelConfig(
+                    durationPredictor = pickFile("duration_predictor.int8.onnx", "duration_predictor.onnx"),
+                    textEncoder = pickFile("text_encoder.int8.onnx", "text_encoder.onnx"),
+                    vectorEstimator = pickFile("vector_estimator.int8.onnx", "vector_estimator.onnx"),
+                    vocoder = pickFile("vocoder.int8.onnx", "vocoder.onnx"),
+                    ttsJson = pickFile("tts.json"),
+                    unicodeIndexer = pickFile("unicode_indexer.bin"),
+                    voiceStyle = pickFile("voice.bin")
+                ),
+                numThreads = threads, debug = false, provider = "cpu"
+            )
+            else -> error("Model '${spec.id}' is an ASR aligner, not a TTS engine.")
         }
         val created = OfflineTts(assetManager = null, config = OfflineTtsConfig(model = modelCfg, maxNumSentences = 1))
         ttsInstance = created
@@ -433,6 +664,40 @@ class OfflineVoiceEngine(
         runCatching { ttsInstance?.release() }
         ttsInstance = null
         loadedModelId = ""
+    }
+
+    private fun ensureAsrLoadedLocked(spec: VoiceModelSpec): OfflineRecognizer {
+        val cur = asrInstance
+        if (cur != null && loadedAsrId == spec.id) return cur
+        releaseAsrLocked()
+        val dir = modelDir(spec)
+        val modelPath = File(dir, spec.modelFileName).absolutePath
+        val tokensPath = File(dir, spec.tokensFileName).absolutePath
+        val threads = settingsStore.computeProfile.value.threads.coerceIn(2, 4)
+        val modelCfg = when (spec.kind) {
+            VoiceEngineKind.ASR_ZIPFORMER -> OfflineModelConfig(
+                zipformerCtc = OfflineZipformerCtcModelConfig(model = modelPath),
+                tokens = tokensPath, numThreads = threads, debug = false, provider = "cpu"
+            )
+            VoiceEngineKind.ASR_SENSEVOICE -> OfflineModelConfig(
+                senseVoice = OfflineSenseVoiceModelConfig(model = modelPath, language = "auto", useInverseTextNormalization = true),
+                tokens = tokensPath, numThreads = threads, debug = false, provider = "cpu"
+            )
+            else -> error("Not an ASR model: ${spec.id}")
+        }
+        val rec = OfflineRecognizer(
+            assetManager = null,
+            config = OfflineRecognizerConfig(featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80), modelConfig = modelCfg)
+        )
+        asrInstance = rec
+        loadedAsrId = spec.id
+        return rec
+    }
+
+    private fun releaseAsrLocked() {
+        runCatching { asrInstance?.release() }
+        asrInstance = null
+        loadedAsrId = ""
     }
 
     private suspend fun downloadWithResume(url: String, partFile: File, modelId: String, name: String) = withContext(Dispatchers.IO) {
@@ -564,6 +829,43 @@ class OfflineVoiceEngine(
         }
         outFile.parentFile?.mkdirs()
         FileOutputStream(outFile).use { out -> out.write(header); out.write(pcm.array()); out.fd.sync() }
+    }
+
+    private fun readWavFloatSamples(file: File): Pair<FloatArray, Int> {
+        val bytes = file.readBytes()
+        if (bytes.size < 44) return FloatArray(0) to 24000
+        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        var pos = 12
+        var channels = 1
+        var sampleRate = 24000
+        var bitsPerSample = 16
+        var dataOffset = 44
+        var dataSize = bytes.size - 44
+        while (pos + 8 <= bytes.size) {
+            val id = String(bytes, pos, 4, Charsets.US_ASCII)
+            val sz = bb.getInt(pos + 4).coerceAtLeast(0)
+            if (id == "fmt " && pos + 24 <= bytes.size) {
+                channels = bb.getShort(pos + 10).toInt().coerceAtLeast(1)
+                sampleRate = bb.getInt(pos + 12).coerceAtLeast(8000)
+                bitsPerSample = bb.getShort(pos + 22).toInt().coerceAtLeast(8)
+            } else if (id == "data") {
+                dataOffset = pos + 8
+                dataSize = min(sz, bytes.size - dataOffset)
+                break
+            }
+            pos += 8 + sz + (sz and 1)
+        }
+        if (bitsPerSample != 16 || dataSize <= 0) return FloatArray(0) to sampleRate
+        val frameBytes = 2 * channels
+        val nFrames = dataSize / frameBytes
+        val out = FloatArray(nFrames)
+        for (i in 0 until nFrames) {
+            var sum = 0f
+            val base = dataOffset + i * frameBytes
+            for (ch in 0 until channels) sum += bb.getShort(base + ch * 2).toFloat() / 32768f
+            out[i] = sum / channels
+        }
+        return out to sampleRate
     }
 
     private fun readWavHeaderInfo(file: File): Pair<Int, Double> = runCatching {

@@ -22,9 +22,18 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: AtelierViewModel by viewModels()
 
+    private var pendingRecordCallback: ((Boolean) -> Unit)? = null
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
+
+    private val recordAudioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        pendingRecordCallback?.invoke(granted)
+        pendingRecordCallback = null
+    }
 
     private val importFilesLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -52,7 +61,15 @@ class MainActivity : ComponentActivity() {
                 AtelierMainScreen(
                     viewModel = viewModel,
                     onImportFiles = { runCatching { importFilesLauncher.launch(arrayOf("*/*")) } },
-                    onExportWorkspaceZip = { runCatching { exportZipLauncher.launch("atelier_workspace.zip") } }
+                    onExportWorkspaceZip = { runCatching { exportZipLauncher.launch("atelier_workspace.zip") } },
+                    onRequestRecordAudio = { cb ->
+                        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                            cb(true)
+                        } else {
+                            pendingRecordCallback = cb
+                            runCatching { recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+                        }
+                    }
                 )
             }
         }

@@ -24,7 +24,9 @@ class AtelierBridgeServer(
     private val crashReporter: CrashReporter,
     private val inspector: StudioInspector,
     private val mediaExport: MediaExportManager,
-    private val voiceEngine: OfflineVoiceEngine
+    private val voiceEngine: OfflineVoiceEngine,
+    private val hardwareExporter: HardwareVideoExporter,
+    private val automation: StudioAutomationManager
 ) {
     val token: String = ByteArray(24).apply { SecureRandom().nextBytes(this) }
         .joinToString("") { String.format("%02x", it) }
@@ -117,6 +119,7 @@ class AtelierBridgeServer(
     private fun dispatch(method: String, p: JSONObject): Any = when (method) {
         "inspect.snapshot" -> if (p.optString("format", "markdown").equals("json", true)) inspector.getFullSnapshotJson() else inspector.buildFullSnapshotMarkdown()
         "inspect.status" -> inspector.getHardwareAndAppStatusJson()
+        "app.telemetry" -> automation.telemetryJson()
         "inspect.runtime" -> inspector.getRuntimeStatusJson()
         "inspect.settings" -> inspector.getSettingsJson()
         "inspect.file_tree" -> inspector.getFileTreeJson(p.optBoolean("include_scenes", true))
@@ -266,6 +269,7 @@ class AtelierBridgeServer(
         "pip.list" -> coordinator.runPipBlockingForBridge("list", "")
 
         "voice.models" -> voiceEngine.catalogJson()
+        "voice.asr_models" -> voiceEngine.asrCatalogJson()
         "voice.install" -> runBlocking {
             val id = p.getString("model")
             val spec = voiceEngine.catalog.firstOrNull { it.id == id } ?: error("Unknown voice model: $id")
@@ -288,13 +292,17 @@ class AtelierBridgeServer(
             JSONObject().put("updated", map.size)
         }
         "voice.say" -> {
+            val refRaw = p.optString("ref_wav", "")
+            val refHost = if (refRaw.isBlank()) "" else resolveGuestOrHost(refRaw).absolutePath
             val res = voiceEngine.synthesize(
                 text = p.getString("text"),
                 modelId = p.optString("model", ""),
                 sid = p.optInt("sid", -1),
                 speed = p.optDouble("speed", 1.0).toFloat(),
                 normalizeMath = p.optBoolean("normalize_math", true),
-                customOutName = p.optString("out_name", "")
+                customOutName = p.optString("out_name", ""),
+                refWavHostPath = refHost,
+                lang = p.optString("lang", "")
             )
             val wordsArr = JSONArray().apply {
                 res.words.forEach { w -> put(JSONObject().put("word", w.word).put("start", w.startSec).put("end", w.endSec)) }
@@ -315,6 +323,8 @@ class AtelierBridgeServer(
         "voice.synthesize_script" -> {
             val arr = p.getJSONArray("lines")
             val lines = (0 until arr.length()).map { arr.getString(it) }
+            val refRaw = p.optString("ref_wav", "")
+            val refHost = if (refRaw.isBlank()) "" else resolveGuestOrHost(refRaw).absolutePath
             voiceEngine.synthesizeScript(
                 lines = lines,
                 modelId = p.optString("model", ""),
@@ -323,10 +333,42 @@ class AtelierBridgeServer(
                 pauseSec = p.optDouble("pause_sec", 0.28),
                 normalizeMath = p.optBoolean("normalize_math", true),
                 manifestName = p.optString("manifest_name", "timing_manifest.json"),
-                srtName = p.optString("srt_name", "captions.srt")
+                srtName = p.optString("srt_name", "captions.srt"),
+                lang = p.optString("lang", ""),
+                refWavHostPath = refHost
             )
         }
+        "voice.align" -> {
+            val wavHost = resolveGuestOrHost(p.getString("wav_path")).absolutePath
+            voiceEngine.alignWavAudio(wavHost, p.optString("model", ""))
+        }
         "voice.release" -> { voiceEngine.release(); JSONObject().put("released", true) }
+        "export.hardware_transcode" -> runBlocking {
+            automation.releaseHeavyAuxiliaryEngines()
+            val inFile = resolveGuestOrHost(p.getString("in_path"))
+            val outFile = resolveGuestOrHost(p.getString("out_path"))
+            val resFile = hardwareExporter.transcodeClips(
+                clips = listOf(HardwareClipSpec(inFile.absolutePath, p.optLong("trim_start_ms", 0L), p.optLong("trim_end_ms", 0L), p.optDouble("zoom", 1.0).toFloat())),
+                outFile = outFile,
+                targetWidth = p.optInt("width", 1920),
+                targetHeight = p.optInt("height", 1080)
+            )
+            JSONObject().put("outputPath", p.getString("out_path")).put("sizeBytes", resFile.length()).put("summary", "HW transcoded ${resFile.name}")
+        }
+        "brand.get" -> automation.brandToJson()
+        "brand.set" -> { automation.patchBrand(p); automation.brandToJson() }
+        "brand.export_theme" -> runBlocking {
+            val rel = automation.exportManimThemeFile(p.optString("path", "atelier_theme.py"))
+            JSONObject().put("path", rel).put("summary", "exported $rel")
+        }
+        "batch.list" -> automation.queueToJson()
+        "batch.enqueue" -> {
+            val item = automation.enqueueJob(p.optString("kind", "MANIM_RENDER"), p.optString("title", "Job"), p.getString("target"), p.optString("extra", ""))
+            JSONObject().put("id", item.id).put("status", item.status).put("summary", "queued ${item.title}")
+        }
+        "batch.start" -> { automation.startBatchQueue(); JSONObject().put("started", true) }
+        "batch.pause" -> { automation.pauseBatchQueue(); JSONObject().put("paused", true) }
+        "batch.clear" -> { automation.clearCompletedOrAll(false); JSONObject().put("cleared", true) }
         "stage.publish_video" -> coordinator.publishVideoToStageFromBridge(
             guestPath = p.getString("guest_path"),
             title = p.optString("title", ""),
@@ -334,7 +376,7 @@ class AtelierBridgeServer(
         )
 
         "app.switch_mode" -> {
-            val mode = StudioMode.entries.firstOrNull { it.name.equals(p.optString("mode"), true) } ?: error("Expected CODE or CONTROL")
+            val mode = StudioMode.entries.firstOrNull { it.name.equals(p.optString("mode"), true) } ?: error("Expected CODE, EDIT, AUDIO, or CONTROL")
             settingsStore.setStudioMode(mode)
             JSONObject().put("studioMode", mode.name)
         }
@@ -385,6 +427,13 @@ class AtelierBridgeServer(
 
     private fun requirePath(p: JSONObject): String =
         p.optString("path", "").trim().ifBlank { error("Missing required 'path' parameter") }
+
+    private fun resolveGuestOrHost(path: String): File = when {
+        path.startsWith("/outputs/") -> File(runtimeManager.outputsDir, path.removePrefix("/outputs/"))
+        path.startsWith("/workspace/") -> File(workspaceRepo.workspaceDir, path.removePrefix("/workspace/"))
+        path.startsWith("/user-site/") -> File(runtimeManager.userSiteDir, path.removePrefix("/user-site/"))
+        else -> File(path)
+    }
 
     private fun readUntilHeaderEnd(input: BufferedInputStream): ByteArray? {
         val out = ByteArrayOutputStream()

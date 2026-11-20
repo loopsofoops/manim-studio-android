@@ -724,6 +724,7 @@ class ExecutionCoordinator(
         onFinished: (exitCode: Int, artifactHostPath: String) -> Unit = { _, _ -> }
     ) {
         launchTask(modeLabel = modeLabel, initialStage = initialStage) { startMs ->
+            onBeforeHeavyRender()
             val scriptHost = File(runtimeManager.outputsDir, ".atelier_media_job.py")
             scriptHost.writeText(pythonCode, Charsets.UTF_8)
             crashReporter.lastCommand = "python3 /outputs/.atelier_media_job.py"
@@ -796,6 +797,44 @@ class ExecutionCoordinator(
         val exp = if (autoSave) mediaExport.saveVideoToStorage(hostFile, title.ifBlank { hostFile.nameWithoutExtension }) else null
         setPreviewArtifact(OutputArtifact(snap, OutputKind.VIDEO, title.ifBlank { hostFile.name }, tel, exp?.displayLocation ?: "", 0L, System.currentTimeMillis()))
         return JSONObject().put("published", true).put("path", snap).put("exportedLocation", exp?.displayLocation ?: "").put("telemetry", tel.summaryBadge())
+    }
+
+    fun runStandalonePythonForBatch(pythonCode: String): Pair<Int, String> {
+        onBeforeHeavyRender()
+        val f = File(runtimeManager.outputsDir, ".atelier_batch_job.py")
+        f.writeText(pythonCode, Charsets.UTF_8)
+        return runBridgeSubProcess(listOf("/opt/atelier-venv/bin/python3", "-u", "/outputs/.atelier_batch_job.py"))
+    }
+
+    fun runHardwareVideoExport(
+        clips: List<HardwareClipSpec>,
+        outFile: File,
+        width: Int,
+        height: Int,
+        exporter: HardwareVideoExporter,
+        autoSave: Boolean,
+        onFinished: (Boolean) -> Unit = {}
+    ) {
+        launchTask(modeLabel = "Media3 HW Export", initialStage = "Hardware encoding ${width}x${height}...") { startMs ->
+            onBeforeHeavyRender()
+            RenderForegroundService.update(context, "Media3 HW Export", "${width}x${height} H.264", 0f)
+            val resultFile = exporter.transcodeClips(clips, outFile, width, height) { prog ->
+                _state.update { it.copy(progress = prog, stageLabel = "Hardware encoding ${(prog * 100).toInt()}%") }
+            }
+            val elapsed = System.currentTimeMillis() - startMs
+            val tel = probeVideo(resultFile)
+            val snap = blobStore.snapshotArtifact(resultFile, resultFile.nameWithoutExtension)
+            val exp = if (autoSave) mediaExport.saveVideoToStorage(resultFile, resultFile.nameWithoutExtension) else null
+            setPreviewArtifact(OutputArtifact(snap, OutputKind.VIDEO, resultFile.name, tel, exp?.displayLocation ?: "", 0L, System.currentTimeMillis()))
+            _state.update {
+                it.copy(
+                    isRunning = false, stageLabel = "HW Export ready", progress = 1f, lastExitCode = 0, elapsedMs = elapsed,
+                    bannerMessage = if (exp?.success == true) "HW Export saved to ${exp.displayLocation}" else "Hardware export ready (${elapsed}ms)",
+                    bannerIsError = false
+                )
+            }
+            onFinished(true)
+        }
     }
 
     fun runShellCommand(command: String) {

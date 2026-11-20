@@ -229,6 +229,12 @@ class StudioSettingsStore(context: Context) {
                 code = "import atelier\n\nactive = atelier.inspect.active_file(include_content=False)\npath = active[\"relativePath\"]\nscenes = atelier.manim.detect_scenes(path)\nprint(\"Scenes:\", scenes)\nfor sc in scenes:\n    res = atelier.manim.render(path, scene=sc)\n    print(sc, \"exit=\", res.get(\"exitCode\"), res.get(\"outputPath\"))\natelier.app.toast(f\"Rendered {len(scenes)} scene(s)\")\n"
             ),
             ControllerMacro(
+                id = "blueprint_ep",
+                name = "Unified Blueprint -> Publish Kit",
+                description = "Build voice + cue-locked music + timeline from Markdown script with [CHAPTER:] & [MOOD:] tags",
+                code = "import atelier\n\nscript = \"\"\"\n[CHAPTER: The Unit Circle]\n[MOOD: curious]\nMultiplying by e^{i\\\\theta} rotates smoothly along the unit circle.\n[SFX: soft_pop]\n[MOOD: climax]\nAt angle \\\\pi, we reach negative one: e^{i\\\\pi} + 1 = 0.\n[SFX: qed_chord]\n[MOOD: resolve]\nFive constants united.\n\"\"\"\nres = atelier.blueprint.build(script, timeline_name=\"euler_ep\")\nprint(res)\natelier.app.switch_mode(\"EDIT\")\natelier.app.toast(res[\"summary\"])\n"
+            ),
+            ControllerMacro(
                 id = "full_yt_master",
                 name = "Full YouTube Master",
                 description = "Compose Felt-Piano score + Q.E.D. SFX + build timeline + master -14 LUFS 16:9 & 9:16",

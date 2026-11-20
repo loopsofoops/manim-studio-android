@@ -8,6 +8,8 @@ import com.atelier.manim.data.WorkspaceRepository
 import com.atelier.manim.runtime.AtelierBridgeServer
 import com.atelier.manim.runtime.CrashReporter
 import com.atelier.manim.runtime.ExecutionCoordinator
+import com.atelier.manim.runtime.HardwareVideoExporter
+import com.atelier.manim.runtime.StudioAutomationManager
 import com.atelier.manim.runtime.OfflineVoiceEngine
 import com.atelier.manim.runtime.ProotEngine
 import com.atelier.manim.runtime.RuntimeManager
@@ -39,6 +41,10 @@ class AtelierApp : Application() {
     lateinit var coordinator: ExecutionCoordinator
         private set
     lateinit var inspector: StudioInspector
+        private set
+    lateinit var hardwareExporter: HardwareVideoExporter
+        private set
+    lateinit var automation: StudioAutomationManager
         private set
     lateinit var bridgeServer: AtelierBridgeServer
         private set
@@ -76,6 +82,15 @@ class AtelierApp : Application() {
             crashReporter = crashReporter,
             onBeforeHeavyRender = { voiceEngine.release() }
         )
+        hardwareExporter = HardwareVideoExporter(this)
+        automation = StudioAutomationManager(
+            context = this,
+            runtimeManager = runtimeManager,
+            workspaceRepo = workspaceRepo,
+            settingsStore = settingsStore,
+            coordinator = coordinator,
+            voiceEngine = voiceEngine
+        )
         inspector = StudioInspector(
             context = this,
             runtimeManager = runtimeManager,
@@ -85,7 +100,8 @@ class AtelierApp : Application() {
             crashReporter = crashReporter,
             dao = database.dao(),
             bridgePortProvider = { if (::bridgeServer.isInitialized) bridgeServer.port else 0 },
-            voiceEngine = voiceEngine
+            voiceEngine = voiceEngine,
+            automation = automation
         )
         bridgeServer = AtelierBridgeServer(
             runtimeManager = runtimeManager,
@@ -95,7 +111,9 @@ class AtelierApp : Application() {
             crashReporter = crashReporter,
             inspector = inspector,
             mediaExport = mediaExport,
-            voiceEngine = voiceEngine
+            voiceEngine = voiceEngine,
+            hardwareExporter = hardwareExporter,
+            automation = automation
         )
         bridgeServer.start()
 

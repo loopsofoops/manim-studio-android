@@ -21,8 +21,16 @@ import com.atelier.manim.runtime.ControllerStep
 import com.atelier.manim.runtime.CrashReportEntry
 import com.atelier.manim.runtime.StudioMode
 import com.atelier.manim.runtime.StudioUiEvent
+import com.atelier.manim.runtime.BatchJobItem
+import com.atelier.manim.runtime.BrandKitConfig
+import com.atelier.manim.runtime.HardwareClipSpec
+import com.atelier.manim.runtime.HardwareTelemetry
 import com.atelier.manim.runtime.VoiceDownloadState
 import com.atelier.manim.runtime.VoiceModelSpec
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.Locale
+import kotlin.math.max
 import com.atelier.manim.runtime.ExecutionState
 import com.atelier.manim.runtime.ManimPreset
 import com.atelier.manim.runtime.ManimRenderMode
@@ -63,6 +71,11 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     val voiceCatalog: List<VoiceModelSpec> get() = app.voiceEngine.catalog
     val installedVoiceIds: StateFlow<Set<String>> = app.voiceEngine.installedIds
     val voiceDownloadState: StateFlow<VoiceDownloadState> = app.voiceEngine.downloadState
+    val telemetry: StateFlow<HardwareTelemetry> = app.automation.telemetry
+    val brandKit: StateFlow<BrandKitConfig> = app.automation.brand
+    val batchQueue: StateFlow<List<BatchJobItem>> = app.automation.batchQueue
+    val batchRunning: StateFlow<Boolean> = app.automation.batchRunning
+    val thermalPaused: StateFlow<Boolean> = app.automation.thermalPaused
 
     val files: StateFlow<List<ProjectFileEntity>> = app.workspaceRepo.observeFiles()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -130,6 +143,44 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     private val _sfxFiles = MutableStateFlow<List<File>>(emptyList())
     val sfxFiles: StateFlow<List<File>> = _sfxFiles.asStateFlow()
 
+    private val _voiceBusy = MutableStateFlow(false)
+    val voiceBusy: StateFlow<Boolean> = _voiceBusy.asStateFlow()
+
+    private val _isRecordingRef = MutableStateFlow(false)
+    val isRecordingRef: StateFlow<Boolean> = _isRecordingRef.asStateFlow()
+
+    private val _cloneRefWavPath = MutableStateFlow(if (app.voiceEngine.cloneRefFile.exists()) app.voiceEngine.cloneRefFile.absolutePath else "")
+    val cloneRefWavPath: StateFlow<String> = _cloneRefWavPath.asStateFlow()
+
+    private val _timelineUi = MutableStateFlow(TimelineUiState())
+    val timelineUi: StateFlow<TimelineUiState> = _timelineUi.asStateFlow()
+
+    private val _availableTimelines = MutableStateFlow<List<String>>(listOf("episode_01"))
+    val availableTimelines: StateFlow<List<String>> = _availableTimelines.asStateFlow()
+
+    private val _voiceWaveformPeaks = MutableStateFlow<List<Float>>(emptyList())
+    val voiceWaveformPeaks: StateFlow<List<Float>> = _voiceWaveformPeaks.asStateFlow()
+
+    private val _pacingReport = MutableStateFlow<JSONObject?>(null)
+    val pacingReport: StateFlow<JSONObject?> = _pacingReport.asStateFlow()
+
+    private val _latestThumbnailHostPath = MutableStateFlow("")
+    val latestThumbnailHostPath: StateFlow<String> = _latestThumbnailHostPath.asStateFlow()
+
+    private val _formulaInitial = MutableStateFlow("")
+    val formulaInitial: StateFlow<String> = _formulaInitial.asStateFlow()
+    private val _formulaPreviewPath = MutableStateFlow("")
+    val formulaPreviewPath: StateFlow<String> = _formulaPreviewPath.asStateFlow()
+    private val _formulaPreviewError = MutableStateFlow("")
+    val formulaPreviewError: StateFlow<String> = _formulaPreviewError.asStateFlow()
+    private val _formulaBusy = MutableStateFlow(false)
+    val formulaBusy: StateFlow<Boolean> = _formulaBusy.asStateFlow()
+
+    private val _gitOutput = MutableStateFlow("")
+    val gitOutput: StateFlow<String> = _gitOutput.asStateFlow()
+    private val _gitBusy = MutableStateFlow(false)
+    val gitBusy: StateFlow<Boolean> = _gitBusy.asStateFlow()
+
     private val _replEntries = MutableStateFlow<List<ReplEntry>>(emptyList())
     val replEntries: StateFlow<List<ReplEntry>> = _replEntries.asStateFlow()
     private val _replVars = MutableStateFlow<List<ReplVar>>(emptyList())
@@ -153,6 +204,7 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
     init {
         app.runtimeManager.refreshState()
         refreshAudioAssets()
+        refreshTimelines()
         viewModelScope.launch {
             app.workspaceRepo.syncWorkspaceFromDisk()
             val all = app.workspaceRepo.ensureSeeded()
@@ -321,35 +373,126 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
         app.voiceEngine.playPreviewWav(hostPath)
     }
 
-    fun synthesizeAudioStudioScript(modelId: String, sid: Int, speed: Float) {
+    fun synthesizeAudioStudioScript(modelId: String, sid: Int, speed: Float, lang: String = "en") {
+        if (_voiceBusy.value) return
         val lines = _audioScriptText.value.lines().map { it.trim() }.filter { it.isNotEmpty() }
         if (lines.isEmpty()) { showToast("Enter at least one narration line"); return }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
+            _voiceBusy.value = true
+            try {
                 _voiceStudioSummary.value = "Synthesizing ${lines.size} cue(s)..."
-                val res = app.voiceEngine.synthesizeScript(lines = lines, modelId = modelId, sid = sid, speed = speed, normalizeMath = true)
+                val res = app.voiceEngine.synthesizeScript(
+                    lines = lines, modelId = modelId, sid = sid, speed = speed, normalizeMath = true,
+                    lang = lang, refWavHostPath = _cloneRefWavPath.value
+                )
                 _latestManifestPath.value = res.optString("manifestPath", "")
                 val total = res.optDouble("totalDurationSec", 0.0)
-                _voiceStudioSummary.value = "Ready: ${res.optInt("cueCount")} cues · ${String.format("%.1fs", total)} · SRT saved"
+                _voiceStudioSummary.value = "Ready: ${res.optInt("cueCount")} cues · ${String.format(Locale.US, "%.1fs", total)} · SRT saved"
                 val firstCueWav = res.optJSONArray("cues")?.optJSONObject(0)?.optString("wavPath", "").orEmpty()
                 if (firstCueWav.isNotBlank()) app.voiceEngine.playPreviewWav(app.prootEngine.guestToHostPath(firstCueWav).absolutePath)
-                showToast("Voice script & captions.srt ready (${String.format("%.1fs", total)})")
-            }.onFailure {
-                _voiceStudioSummary.value = "Error: ${it.message}"
-                showToast(it.message ?: "Synthesis failed")
+                showToast("Voice script & captions.srt ready (${String.format(Locale.US, "%.1fs", total)})")
+            } catch (t: Throwable) {
+                _voiceStudioSummary.value = "Error: ${t.message}"
+                showToast(t.message ?: "Synthesis failed")
+            } finally {
+                _voiceBusy.value = false
             }
         }
     }
 
-    fun previewAudioScriptLine1(modelId: String, sid: Int, speed: Float) {
+    fun previewAudioScriptLine1(modelId: String, sid: Int, speed: Float, lang: String = "en") {
+        if (_voiceBusy.value) return
         val line = _audioScriptText.value.lines().firstOrNull { it.isNotBlank() }.orEmpty()
         if (line.isBlank()) { showToast("Script is empty"); return }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                val res = app.voiceEngine.synthesize(text = line, modelId = modelId, sid = sid, speed = speed, normalizeMath = true)
+            _voiceBusy.value = true
+            try {
+                val res = app.voiceEngine.synthesize(
+                    text = line, modelId = modelId, sid = sid, speed = speed, normalizeMath = true,
+                    refWavHostPath = _cloneRefWavPath.value, lang = lang
+                )
                 app.voiceEngine.playPreviewWav(res.wavHostPath)
-                showToast("Playing line 1 (${String.format("%.1fs", res.durationSec)})")
-            }.onFailure { showToast(it.message ?: "Voice preview failed") }
+                showToast("Playing line 1 (${String.format(Locale.US, "%.1fs", res.durationSec)})")
+            } catch (t: Throwable) {
+                showToast(t.message ?: "Voice preview failed")
+            } finally {
+                _voiceBusy.value = false
+            }
+        }
+    }
+
+    fun toggleRecordCloneSample(hasPermission: Boolean) {
+        if (_isRecordingRef.value) {
+            app.voiceEngine.stopRecordingCloneReference()
+            _isRecordingRef.value = false
+            return
+        }
+        if (!hasPermission) { showToast("Microphone permission required for voice cloning"); return }
+        _isRecordingRef.value = true
+        showToast("Recording voice reference (speak 5s)...")
+        app.voiceEngine.startRecordingCloneReference(
+            onComplete = { f ->
+                _isRecordingRef.value = false
+                _cloneRefWavPath.value = f.absolutePath
+                showToast("Saved 5s clone sample: ${f.name}")
+            },
+            onError = { err ->
+                _isRecordingRef.value = false
+                showToast(err)
+            }
+        )
+    }
+
+    fun denoiseCloneSample() {
+        val host = _cloneRefWavPath.value
+        if (host.isBlank() || !File(host).exists()) { showToast("Record a reference sample first"); return }
+        val py = "import atelier\nres = atelier.voice.denoise('/outputs/audio/voice_clone_ref.wav', '/outputs/audio/voice_clone_ref_clean.wav')\nprint('__ATELIER_ARTIFACT__:AUDIO:' + res['path'], flush=True)\n"
+        app.coordinator.runAudioOrTimelineJob("Denoise Mic", "Cleaning vocal recording...", py, autoSaveVideo = false) { code, cleanedHost ->
+            if (code == 0 && cleanedHost.isNotBlank()) {
+                _cloneRefWavPath.value = cleanedHost
+                app.voiceEngine.playPreviewWav(cleanedHost)
+            }
+        }
+    }
+
+    fun runForcedAlignmentOnLatestVoice() {
+        if (_voiceBusy.value) return
+        val targetHost = _cloneRefWavPath.value.takeIf { it.isNotBlank() && File(it).exists() }
+            ?: app.voiceEngine.cacheDir.listFiles()?.filter { it.name.endsWith(".wav") }?.maxByOrNull { it.lastModified() }?.absolutePath
+            ?: ""
+        if (targetHost.isBlank()) { showToast("Synthesize or record a WAV first"); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            _voiceBusy.value = true
+            try {
+                val res = app.voiceEngine.alignWavAudio(targetHost)
+                _voiceStudioSummary.value = "Aligned: ${res.optString("summary")} — \"${res.optString("text").take(80)}\""
+                showToast("ASR aligned ${res.optJSONArray("words")?.length() ?: 0} words")
+            } catch (t: Throwable) {
+                showToast(t.message ?: "Alignment failed")
+            } finally {
+                _voiceBusy.value = false
+            }
+        }
+    }
+
+    fun installStableAudioPack(variant: String, hfToken: String) {
+        val free = app.runtimeManager.freeStorageBytes()
+        if (free < 2_200_000_000L) {
+            showToast("Need >= 2.2 GB free storage for Stable Audio 3.0 pack")
+            return
+        }
+        val safeTok = hfToken.replace("'", "")
+        val py = "import atelier\nres = atelier.neural_audio.install('$variant', hf_token='$safeTok')\nprint(res)\n"
+        app.coordinator.runAudioOrTimelineJob("Install Stable Audio 3", "Installing LiteRT + $variant weights...", py, autoSaveVideo = false)
+    }
+
+    fun generateStableAudioTrack(prompt: String, seconds: Int, variant: String) {
+        val safePrompt = prompt.replace("\n", " ").replace("\"", "'")
+        val fn = if (variant.contains("sfx")) "generate_sfx" else "generate_music"
+        val py = "import atelier\nres = atelier.neural_audio.$fn(\"$safePrompt\", seconds=$seconds)\nprint('__ATELIER_ARTIFACT__:AUDIO:' + res['path'], flush=True)\nprint(res)\n"
+        app.coordinator.runAudioOrTimelineJob("Stable Audio 3", "Generating ${seconds}s stereo neural audio...", py, autoSaveVideo = false) { code, host ->
+            refreshAudioAssets()
+            if (code == 0 && host.isNotBlank()) app.voiceEngine.playPreviewWav(host)
         }
     }
 
@@ -380,11 +523,15 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             showToast("Render a Manim video first")
             return
         }
-        // Copy active snapshot into /outputs/exports/_src_active.mp4 so PRoot FFmpeg can access it cleanly
-        val srcCopy = File(File(app.runtimeManager.outputsDir, "exports").apply { mkdirs() }, "_src_active.mp4")
-        runCatching { File(art.path).copyTo(srcCopy, overwrite = true) }.onFailure {
-            showToast("Failed staging source video"); return
+        viewModelScope.launch(Dispatchers.IO) {
+            val srcCopy = File(File(app.runtimeManager.outputsDir, "exports").apply { mkdirs() }, "_src_active.mp4")
+            val copied = runCatching { File(art.path).copyTo(srcCopy, overwrite = true); true }.getOrDefault(false)
+            if (!copied) { showToast("Failed staging source video"); return@launch }
+            runMuxAfterStage(bgmGuestPath, exportShorts9x16)
         }
+    }
+
+    private fun runMuxAfterStage(bgmGuestPath: String, exportShorts9x16: Boolean) {
         val manPath = _latestManifestPath.value
         val presetName = if (exportShorts9x16) "shorts_9x16_60" else "youtube_1080p60"
         val py = buildString {
@@ -805,6 +952,484 @@ class AtelierViewModel(application: Application) : AndroidViewModel(application)
             runCatching { mmr.release() }
         }
     }
+
+    fun guestToHostFile(guestPath: String): File = app.prootEngine.guestToHostPath(guestPath)
+
+    private fun timelinesDir(): File = File(app.runtimeManager.outputsDir, "timelines").apply { mkdirs() }
+    private fun timelineFileFor(name: String): File = File(timelinesDir(), if (name.endsWith(".json")) name else "$name.timeline.json")
+
+    fun refreshTimelines() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val dir = timelinesDir()
+            val names = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".json") }
+                ?.sortedByDescending { it.lastModified() }
+                ?.map { it.name.removeSuffix(".timeline.json").removeSuffix(".json") }
+                ?.ifEmpty { listOf("episode_01") } ?: listOf("episode_01")
+            _availableTimelines.value = names
+            val activeName = _timelineUi.value.name.takeIf { it in names } ?: names.first()
+            loadTimelineByNameSync(activeName)
+        }
+    }
+
+    fun selectTimeline(name: String) {
+        viewModelScope.launch(Dispatchers.IO) { loadTimelineByNameSync(name) }
+    }
+
+    fun createTimelineProject(name: String) {
+        val clean = name.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "episode_${System.currentTimeMillis() % 1000}" }
+        viewModelScope.launch(Dispatchers.IO) {
+            val f = timelineFileFor(clean)
+            if (!f.exists()) {
+                val doc = JSONObject().put("schema", "atelier.timeline.v2").put("name", clean).put("preset", "youtube_1080p60")
+                    .put("caption_style", "minimal_3b1b").put("updatedAt", System.currentTimeMillis() / 1000)
+                    .put("v2_overlays", JSONArray()).put("video_clips", JSONArray()).put("voice_clips", JSONArray())
+                    .put("sfx_clips", JSONArray()).put("music_clips", JSONArray()).put("captions", JSONArray()).put("chapters", JSONArray())
+                f.writeText(doc.toString(2), Charsets.UTF_8)
+            }
+            refreshTimelines()
+            loadTimelineByNameSync(clean)
+            showToast("Opened timeline: $clean")
+        }
+    }
+
+    private fun readTimelineDoc(name: String): JSONObject {
+        val f = timelineFileFor(name)
+        if (!f.exists()) {
+            return JSONObject().put("schema", "atelier.timeline.v2").put("name", name).put("preset", "youtube_1080p60")
+                .put("caption_style", "minimal_3b1b").put("v2_overlays", JSONArray()).put("video_clips", JSONArray())
+                .put("voice_clips", JSONArray()).put("sfx_clips", JSONArray()).put("music_clips", JSONArray())
+                .put("captions", JSONArray()).put("chapters", JSONArray())
+        }
+        return runCatching { JSONObject(f.readText(Charsets.UTF_8)) }.getOrElse { JSONObject().put("name", name) }
+    }
+
+    private fun writeTimelineDocAndReload(name: String, doc: JSONObject) {
+        doc.put("schema", "atelier.timeline.v2")
+        doc.put("updatedAt", System.currentTimeMillis() / 1000)
+        timelineFileFor(name).writeText(doc.toString(2), Charsets.UTF_8)
+        loadTimelineByNameSync(name)
+    }
+
+    private fun loadTimelineByNameSync(name: String) {
+        val doc = readTimelineDoc(name)
+        val vClips = mutableListOf<EditClipModel>()
+        val vArr = doc.optJSONArray("video_clips") ?: JSONArray()
+        var totalV = 0.0
+        for (i in 0 until vArr.length()) {
+            val o = vArr.getJSONObject(i)
+            val p = o.optString("path")
+            val host = guestToHostFile(p)
+            val srcDur = if (host.exists()) max(0.5, probeVideoLight(host).durationMs / 1000.0) else 5.0
+            val t0 = o.optDouble("trim_start", 0.0).coerceAtLeast(0.0)
+            val t1Raw = o.optDouble("trim_end", 0.0)
+            val t1 = if (t1Raw > t0 + 0.05) min(srcDur, t1Raw) else srcDur
+            val spd = o.optDouble("speed", 1.0).coerceIn(0.25, 4.0)
+            val frz = o.optDouble("freeze_tail_sec", 0.0).coerceAtLeast(0.0)
+            val eff = max(0.2, (t1 - t0) / spd) + frz
+            totalV += eff
+            vClips.add(EditClipModel(i, p, o.optString("label", File(p).name), t0, t1, eff, spd, frz, o.optString("transition", "none"), o.optDouble("zoom_start", 1.0), o.optDouble("zoom_end", 1.0), o.optDouble("pan_x", 0.0), o.optDouble("pan_y", 0.0)))
+        }
+        val ovList = mutableListOf<EditOverlayModel>()
+        val ovArr = doc.optJSONArray("v2_overlays") ?: JSONArray()
+        for (i in 0 until ovArr.length()) {
+            val o = ovArr.getJSONObject(i)
+            ovList.add(EditOverlayModel(i, o.optString("path"), o.optDouble("start", 0.0), o.optDouble("end", 4.0), o.optDouble("x", 0.5).toFloat(), o.optDouble("y", 0.18).toFloat(), o.optDouble("scale", 0.35).toFloat(), o.optDouble("opacity", 1.0).toFloat()))
+        }
+        fun parseAudioArr(arr: JSONArray?, defaultDur: Double): List<EditAudioClipModel> {
+            val list = mutableListOf<EditAudioClipModel>()
+            if (arr == null) return list
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val p = o.optString("path")
+                val hf = guestToHostFile(p)
+                val d = o.optDouble("duration", 0.0).takeIf { it > 0.05 } ?: if (hf.exists() && hf.length() > 44L) max(0.3, (hf.length() - 44.0) / 48000.0) else defaultDur
+                list.add(EditAudioClipModel(i, p, o.optDouble("start", 0.0), d, o.optDouble("gain_db", 0.0), o.optString("text", ""), o.optBoolean("trim_silence", false)))
+            }
+            return list
+        }
+        val voiceList = parseAudioArr(doc.optJSONArray("voice_clips"), 2.5)
+        val sfxList = parseAudioArr(doc.optJSONArray("sfx_clips"), 0.7)
+        val musicList = parseAudioArr(doc.optJSONArray("music_clips"), max(10.0, totalV))
+        val caps = mutableListOf<EditCaptionModel>()
+        val capArr = doc.optJSONArray("captions") ?: JSONArray()
+        for (i in 0 until capArr.length()) {
+            val o = capArr.getJSONObject(i)
+            caps.add(EditCaptionModel(o.optDouble("start", 0.0), o.optDouble("end", 2.0), o.optString("text", "")))
+        }
+        val chaps = mutableListOf<EditChapterModel>()
+        val chArr = doc.optJSONArray("chapters") ?: JSONArray()
+        for (i in 0 until chArr.length()) {
+            val o = chArr.getJSONObject(i)
+            chaps.add(EditChapterModel(o.optDouble("time", 0.0), o.optString("title", "")))
+        }
+        val maxAudioEnd = (voiceList.maxOfOrNull { it.start + it.durationSec } ?: 0.0)
+        _timelineUi.value = TimelineUiState(
+            name = doc.optString("name", name),
+            preset = doc.optString("preset", "youtube_1080p60"),
+            captionStyle = doc.optString("caption_style", "minimal_3b1b"),
+            videoClips = vClips, overlays = ovList, voiceClips = voiceList,
+            sfxClips = sfxList, musicClips = musicList, captions = caps, chapters = chaps,
+            totalDurationSec = max(totalV, maxAudioEnd)
+        )
+        voiceList.firstOrNull()?.let { vc ->
+            val f = guestToHostFile(vc.path)
+            if (f.exists() && f.length() > 44L) _voiceWaveformPeaks.value = decodeQuickWavPeaks(f, 36)
+        }
+    }
+
+    private fun decodeQuickWavPeaks(file: File, bins: Int): List<Float> = runCatching {
+        val bytes = file.readBytes()
+        val dataLen = (bytes.size - 44).coerceAtLeast(0)
+        val totalSamples = dataLen / 2
+        if (totalSamples < bins) return@runCatching emptyList()
+        val step = max(1, totalSamples / bins)
+        val out = ArrayList<Float>(bins)
+        for (b in 0 until bins) {
+            var peak = 0
+            val s0 = b * step
+            val s1 = min(totalSamples, s0 + step)
+            var i = s0
+            while (i < s1) {
+                val off = 44 + i * 2
+                val lo = bytes[off].toInt() and 0xFF
+                val hi = bytes[off + 1].toInt()
+                val v = kotlin.math.abs((hi shl 8) or lo)
+                if (v > peak) peak = v
+                i += max(1, step / 24)
+            }
+            out.add((peak / 32768f).coerceIn(0.08f, 1f))
+        }
+        out
+    }.getOrDefault(emptyList())
+
+    fun addActiveRenderToTimeline() {
+        val art = executionState.value.activeArtifact
+        if (art.kind != OutputKind.VIDEO || art.path.isBlank() || !File(art.path).exists()) {
+            showToast("Render a Manim video first"); return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val clipsDir = File(app.runtimeManager.outputsDir, "clips").apply { mkdirs() }
+            val safe = "${art.title.replace(Regex("[^A-Za-z0-9_-]"), "_")}_${System.currentTimeMillis() % 10000}.mp4"
+            val dest = File(clipsDir, safe)
+            File(art.path).copyTo(dest, overwrite = true)
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name)
+            val arr = doc.optJSONArray("video_clips") ?: JSONArray().also { doc.put("video_clips", it) }
+            arr.put(JSONObject().put("path", "/outputs/clips/$safe").put("label", art.title.ifBlank { safe }).put("trim_start", 0.0).put("trim_end", 0.0).put("speed", 1.0).put("freeze_tail_sec", 0.0).put("transition", "none").put("zoom_start", 1.0).put("zoom_end", 1.0))
+            writeTimelineDocAndReload(name, doc)
+            showToast("Added ${art.title} to V1")
+        }
+    }
+
+    fun importVoiceManifestToTimeline() {
+        val manGuest = _latestManifestPath.value.ifBlank { "/outputs/audio/timing_manifest.json" }
+        val host = guestToHostFile(manGuest)
+        if (!host.exists()) { showToast("Synthesize a voice script in Audio tab first"); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val man = JSONObject(host.readText(Charsets.UTF_8))
+                val cues = man.optJSONArray("cues") ?: JSONArray()
+                val name = _timelineUi.value.name
+                val doc = readTimelineDoc(name)
+                val vArr = JSONArray()
+                val cArr = JSONArray()
+                for (i in 0 until cues.length()) {
+                    val c = cues.getJSONObject(i)
+                    vArr.put(JSONObject().put("path", c.getString("wavPath")).put("start", c.getDouble("startSec")).put("gain_db", 0.0).put("text", c.optString("text")))
+                    cArr.put(JSONObject().put("start", c.getDouble("startSec")).put("end", c.getDouble("endSec")).put("text", c.optString("text")).put("words", c.optJSONArray("words") ?: JSONArray()))
+                }
+                doc.put("voice_clips", vArr).put("captions", cArr)
+                writeTimelineDocAndReload(name, doc)
+                showToast("Imported ${cues.length()} voice cues & captions")
+            }.onFailure { showToast(it.message ?: "Voice import failed") }
+        }
+    }
+
+    fun addLatestMusicToTimeline() {
+        val latest = _musicFiles.value.firstOrNull() ?: run { showToast("Compose a score in Audio tab first"); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name)
+            val mArr = JSONArray().put(JSONObject().put("path", "/outputs/audio/music/${latest.name}").put("start", 0.0).put("duration", 0.0).put("gain_db", -11.0).put("fade_in", 1.2).put("fade_out", 2.2))
+            doc.put("music_clips", mArr)
+            writeTimelineDocAndReload(name, doc)
+            showToast("Added BGM: ${latest.name}")
+        }
+    }
+
+    fun splitVideoClipAt(playheadSec: Double) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val tl = _timelineUi.value
+            var acc = 0.0
+            val target = tl.videoClips.firstOrNull { c ->
+                val hit = playheadSec > acc + 0.25 && playheadSec < acc + c.durationSec - 0.25
+                if (!hit) acc += c.durationSec
+                hit
+            } ?: run { showToast("Move playhead inside a V1 clip to split"); return@launch }
+
+            val localSplit = target.trimStart + (playheadSec - acc) * target.speed
+            val doc = readTimelineDoc(tl.name)
+            val oldArr = doc.optJSONArray("video_clips") ?: return@launch
+            val newArr = JSONArray()
+            for (i in 0 until oldArr.length()) {
+                val obj = oldArr.getJSONObject(i)
+                if (i == target.index) {
+                    val left = JSONObject(obj.toString()).put("trim_end", localSplit).put("freeze_tail_sec", 0.0)
+                    val right = JSONObject(obj.toString()).put("trim_start", localSplit).put("label", "${target.label.substringBeforeLast('.')}_B")
+                    newArr.put(left); newArr.put(right)
+                } else newArr.put(obj)
+            }
+            doc.put("video_clips", newArr)
+            writeTimelineDocAndReload(tl.name, doc)
+            showToast("Split clip at ${String.format(Locale.US, "%.2fs", playheadSec)}")
+        }
+    }
+
+    fun updateVideoClip(index: Int, trimStart: Double, trimEnd: Double, speed: Double, freezeTail: Double, transition: String, zoomStart: Double, zoomEnd: Double) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name)
+            val arr = doc.optJSONArray("video_clips") ?: return@launch
+            if (index !in 0 until arr.length()) return@launch
+            arr.getJSONObject(index).put("trim_start", trimStart).put("trim_end", trimEnd).put("speed", speed)
+                .put("freeze_tail_sec", freezeTail).put("transition", transition).put("zoom_start", zoomStart).put("zoom_end", zoomEnd)
+            writeTimelineDocAndReload(name, doc)
+        }
+    }
+
+    fun deleteVideoClip(index: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name)
+            val oldArr = doc.optJSONArray("video_clips") ?: return@launch
+            val newArr = JSONArray()
+            for (i in 0 until oldArr.length()) if (i != index) newArr.put(oldArr.getJSONObject(i))
+            doc.put("video_clips", newArr)
+            writeTimelineDocAndReload(name, doc)
+        }
+    }
+
+    fun setTimelineCaptionStyle(style: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name).put("caption_style", style)
+            writeTimelineDocAndReload(name, doc)
+        }
+    }
+
+    fun addTimelineChapter(timeSec: Double, title: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name)
+            val arr = doc.optJSONArray("chapters") ?: JSONArray().also { doc.put("chapters", it) }
+            arr.put(JSONObject().put("time", timeSec).put("title", title))
+            writeTimelineDocAndReload(name, doc)
+            showToast("Chapter added: $title")
+        }
+    }
+
+    fun runPacingScan() {
+        val targetPath = _timelineUi.value.videoClips.firstOrNull()?.path ?: run {
+            val art = executionState.value.activeArtifact
+            if (art.kind == OutputKind.VIDEO && File(art.path).exists()) {
+                val dst = File(File(app.runtimeManager.outputsDir, "exports").apply { mkdirs() }, "_pacing_src.mp4")
+                File(art.path).copyTo(dst, overwrite = true)
+                "/outputs/exports/_pacing_src.mp4"
+            } else ""
+        }
+        if (targetPath.isBlank()) { showToast("Add or render a video first"); return }
+        _pacingReport.value = null
+        val py = "import atelier, json\nrep = atelier.pacing.analyze('$targetPath')\nwith open('/outputs/exports/_pacing_report.json','w') as f: json.dump(rep, f)\nprint(rep['summary'])\n"
+        app.coordinator.runAudioOrTimelineJob("Pacing Scan", "Analyzing silences, static stretches & LUFS...", py, autoSaveVideo = false) { code, _ ->
+            if (code == 0) {
+                val rf = File(app.runtimeManager.outputsDir, "exports/_pacing_report.json")
+                if (rf.exists()) runCatching { _pacingReport.value = JSONObject(rf.readText(Charsets.UTF_8)) }
+            }
+        }
+    }
+
+    fun autoTrimTimelineDeadAir() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = _timelineUi.value.name
+            val doc = readTimelineDoc(name)
+            val arr = doc.optJSONArray("voice_clips") ?: JSONArray()
+            for (i in 0 until arr.length()) arr.getJSONObject(i).put("trim_silence", true)
+            writeTimelineDocAndReload(name, doc)
+            showToast("Auto-Trim Dead Air enabled on voice track")
+        }
+    }
+
+    fun generateThumbnail(timeSec: Double, title: String, subtitle: String, mathTex: String) {
+        val vidGuest = _timelineUi.value.videoClips.firstOrNull()?.path ?: ""
+        val sTitle = title.replace("\"", "'")
+        val sSub = subtitle.replace("\"", "'")
+        val sMath = mathTex.replace("\\", "\\\\").replace("\"", "'")
+        val py = "import atelier\nres = atelier.thumbnail.create(video_path='$vidGuest', time_sec=$timeSec, title=\"$sTitle\", subtitle=\"$sSub\", math_tex=\"$sMath\", out_png='/outputs/thumbnails/latest_thumb.png')\nprint(res['summary'])\n"
+        app.coordinator.runAudioOrTimelineJob("Thumbnail Studio", "Rendering 1280x720 PNG...", py, autoSaveVideo = false) { code, _ ->
+            val f = File(app.runtimeManager.outputsDir, "thumbnails/latest_thumb.png")
+            if (code == 0 && f.exists()) {
+                _latestThumbnailHostPath.value = f.absolutePath
+                app.mediaExport.saveImageToStorage(f, "thumb_${_timelineUi.value.name}")
+                showToast("Thumbnail saved to Pictures/Atelier/")
+            }
+        }
+    }
+
+    fun exportCurrentTimeline(preset: String, hardwareFast: Boolean, fullPublishBundle: Boolean) {
+        val tl = _timelineUi.value
+        if (tl.videoClips.isEmpty()) { showToast("Add at least one video clip to V1"); return }
+        if (hardwareFast && !fullPublishBundle) {
+            val (w, h) = when (preset) {
+                "youtube_720p30" -> 1280 to 720
+                "youtube_4k60" -> 3840 to 2160
+                "shorts_9x16_60", "shorts_9x16_30" -> 1080 to 1920
+                "square_1x1" -> 1080 to 1080
+                else -> 1920 to 1080
+            }
+            val specs = tl.videoClips.map {
+                HardwareClipSpec(guestToHostFile(it.path).absolutePath, (it.trimStart * 1000).toLong(), (it.trimEnd * 1000).toLong(), it.zoomStart.toFloat())
+            }
+            val outFile = File(File(app.runtimeManager.outputsDir, "exports").apply { mkdirs() }, "${tl.name}_hw_${System.currentTimeMillis() % 10000}.mp4")
+            app.coordinator.runHardwareVideoExport(specs, outFile, w, h, app.hardwareExporter, settings.autoSaveStorage.value) { ok ->
+                if (ok) settings.setStudioMode(StudioMode.CODE)
+            }
+            return
+        }
+        val py = if (fullPublishBundle) {
+            "import atelier\nres = atelier.export.publish_bundle('${tl.name}', include_short=True, master_preset='$preset')\nprint('__ATELIER_ARTIFACT__:VIDEO:' + res['masterMp4'], flush=True)\nprint(res['summary'])\n"
+        } else {
+            "import atelier\nres = atelier.export.render_timeline('${tl.name}', preset='$preset', publish_to_stage=False)\nprint('__ATELIER_ARTIFACT__:VIDEO:' + res['outputPath'], flush=True)\nprint(res['summary'])\n"
+        }
+        val title = if (fullPublishBundle) "Publish Kit · ${tl.name}" else "Export · $preset"
+        app.coordinator.runAudioOrTimelineJob(title, "Rendering $preset + mastering -14 LUFS...", py, autoSaveVideo = settings.autoSaveStorage.value) { code, _ ->
+            if (code == 0) settings.setStudioMode(StudioMode.CODE)
+        }
+    }
+
+    fun dubCurrentTimeline(targetLang: String, modelId: String, translatedLinesRaw: String) {
+        val tl = _timelineUi.value
+        val lines = translatedLinesRaw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val qLines = JSONObject.quote(JSONArray(lines).toString())
+        val py = "import atelier, json\nlines = json.loads($qLines)\nres = atelier.dub.timeline('${tl.name}', target_lang='$targetLang', translated_lines=lines, voice_model='$modelId')\nprint(res['summary'])\n"
+        app.coordinator.runAudioOrTimelineJob("Dub ($targetLang)", "Synthesizing dub & auto-retiming...", py, autoSaveVideo = false) { code, _ ->
+            if (code == 0) {
+                refreshTimelines()
+                selectTimeline("${tl.name}_dub_${targetLang.lowercase()}")
+                showToast("Dubbed timeline ready (${targetLang.uppercase()})")
+            }
+        }
+    }
+
+    fun openFormulaPreviewFromCursor() {
+        val v = _editorValue.value
+        val sel = if (!v.selection.collapsed) v.text.substring(min(v.selection.start, v.selection.end), max(v.selection.start, v.selection.end)) else {
+            val pos = min(v.selection.start, v.text.length)
+            val s = v.text.lastIndexOf('\n', (pos - 1).coerceAtLeast(0)).let { if (it < 0) 0 else it + 1 }
+            val e = v.text.indexOf('\n', pos).let { if (it < 0) v.text.length else it }
+            v.text.substring(s, e)
+        }
+        val rx = Regex("""(?:MathTex|Tex)\(\s*r?["']{1,3}(.+?)["']{1,3}""")
+        val extracted = rx.find(sel)?.groupValues?.get(1) ?: sel.trim()
+        _formulaInitial.value = extracted
+        _formulaPreviewError.value = ""
+        if (extracted.isNotBlank()) renderFormulaPreview(extracted)
+    }
+
+    fun renderFormulaPreview(expr: String) {
+        if (_formulaBusy.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _formulaBusy.value = true
+            _formulaPreviewError.value = ""
+            try {
+                val safe = expr.replace("\\", "\\\\").replace("\"", "\\\"")
+                val py = "import atelier; r = atelier.manim.preview_formula(\"$safe\"); print('FORMULA_PNG:' + r['path'])"
+                val (code, out) = app.coordinator.runStandalonePythonForBatch(py)
+                val pngGuest = out.lines().firstOrNull { it.startsWith("FORMULA_PNG:") }?.removePrefix("FORMULA_PNG:")?.trim().orEmpty()
+                if (code == 0 && pngGuest.isNotBlank()) {
+                    _formulaPreviewPath.value = guestToHostFile(pngGuest).absolutePath
+                } else {
+                    _formulaPreviewError.value = out.takeLast(400).ifBlank { "Formula compile failed" }
+                }
+            } catch (t: Throwable) {
+                _formulaPreviewError.value = t.message ?: "Formula error"
+            } finally {
+                _formulaBusy.value = false
+            }
+        }
+    }
+
+    fun runGitAction(action: String, arg1: String, arg2: String) {
+        if (_gitBusy.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _gitBusy.value = true
+            try {
+                val py = when (action) {
+                    "init" -> "import atelier; r = atelier.git.init(); print(r['stdout'] or r['stderr'] or 'Initialized git repo')"
+                    "status" -> "import atelier; r = atelier.git.status(); print(r['stdout'] or r['stderr'] or 'Clean working tree')"
+                    "diff" -> "import atelier; r = atelier.git.diff(); print(r['stdout'] or 'No unstaged changes')"
+                    "log" -> "import atelier; r = atelier.git.log(20); print(r['stdout'] or r['stderr'] or 'No commits yet')"
+                    "commit" -> "import atelier; r = atelier.git.commit_all(${JSONObject.quote(arg1)}); print(r['stdout'] or r['stderr'])"
+                    "branch" -> "import atelier; r = atelier.git.run(['checkout', '-B', ${JSONObject.quote(arg1)}]); print(r['stdout'] or r['stderr'])"
+                    "remote" -> "import atelier; atelier.git.run(['remote', 'remove', 'origin']); r = atelier.git.run(['remote', 'add', 'origin', ${JSONObject.quote(arg1)}]); print(r['stdout'] or r['stderr'] or 'Origin updated')"
+                    "pull" -> "import atelier; r = atelier.git.run(['pull']); print(r['stdout'] or r['stderr'])"
+                    "push" -> "import atelier; r = atelier.git.run(['push', '-u', 'origin', 'HEAD']); print(r['stdout'] or r['stderr'])"
+                    else -> "print('Unknown git command')"
+                }
+                val (_, out) = app.coordinator.runStandalonePythonForBatch(py)
+                _gitOutput.value = out.trim()
+            } catch (t: Throwable) {
+                _gitOutput.value = "Error: ${t.message}"
+            } finally {
+                _gitBusy.value = false
+            }
+        }
+    }
+
+    fun saveBrandKit(cfg: BrandKitConfig) {
+        app.automation.updateBrand(cfg)
+        showToast("Brand Kit saved")
+    }
+
+    fun exportBrandThemeFile() {
+        viewModelScope.launch {
+            val rel = app.automation.exportManimThemeFile("atelier_theme.py")
+            showToast("Generated /workspace/$rel")
+        }
+    }
+
+    fun buildUnifiedBlueprint(name: String, mdScript: String) {
+        val clean = name.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "blueprint_ep" }
+        val qScript = JSONObject.quote(mdScript)
+        val py = "import atelier\nres = atelier.blueprint.build($qScript, timeline_name='$clean')\nprint(res['summary'])\n"
+        app.coordinator.runAudioOrTimelineJob("Episode Blueprint", "Synthesizing voice, SFX, music & timeline...", py, autoSaveVideo = false) { code, _ ->
+            if (code == 0) {
+                refreshAudioAssets()
+                refreshTimelines()
+                selectTimeline(clean)
+                settings.setStudioMode(StudioMode.EDIT)
+            }
+        }
+    }
+
+    fun enqueueActiveSceneBatch() {
+        val f = _activeFile.value ?: run { showToast("Open a Manim file first"); return }
+        val sc = settings.selectedScene.value.ifBlank { _detectedScenes.value.firstOrNull() ?: "" }
+        if (sc.isBlank()) { showToast("No Manim scene detected"); return }
+        app.automation.enqueueJob("MANIM_RENDER", "Render $sc (${f.name})", f.relativePath, sc)
+        showToast("Queued $sc in Batch Queue")
+    }
+
+    fun enqueueActiveTimelineBatch(preset: String = "") {
+        val tl = _timelineUi.value
+        val p = preset.ifBlank { tl.preset }
+        app.automation.enqueueJob("TIMELINE_EXPORT", "Export ${tl.name} ($p)", tl.name, p)
+        showToast("Queued ${tl.name} ($p)")
+    }
+
+    fun startBatchQueue() = app.automation.startBatchQueue()
+    fun pauseBatchQueue() = app.automation.pauseBatchQueue()
+    fun removeBatchJob(id: String) = app.automation.removeJob(id)
+    fun clearFinishedBatchJobs() = app.automation.clearCompletedOrAll(false)
 
     override fun onCleared() {
         super.onCleared()

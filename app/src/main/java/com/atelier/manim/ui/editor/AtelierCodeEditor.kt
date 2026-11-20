@@ -65,6 +65,8 @@ fun AtelierCodeEditor(
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onJumpHandled: () -> Unit,
+    onOpenOutline: (() -> Unit)? = null,
+    onPreviewFormula: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAtelierColors.current
@@ -268,6 +270,8 @@ fun AtelierCodeEditor(
             AccessoryIconBtn(AtelierIcons.Undo, canUndo, onUndo)
             AccessoryIconBtn(AtelierIcons.Redo, canRedo, onRedo)
             AccessoryIconBtn(AtelierIcons.Search, true) { showFind = !showFind }
+            if (onOpenOutline != null) AccessoryIconBtn(AtelierIcons.Outline, true, onOpenOutline)
+            if (onPreviewFormula != null) AccessoryIconBtn(AtelierIcons.Formula, true, onPreviewFormula)
             Box(Modifier.width(1.dp).height(18.dp).background(colors.hairline))
             for ((insertText, label) in snippets) {
                 Box(

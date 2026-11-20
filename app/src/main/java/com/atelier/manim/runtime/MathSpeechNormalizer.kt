@@ -6,6 +6,7 @@ import java.io.File
 
 class MathSpeechNormalizer(context: Context) {
     private val glossaryFile = File(context.filesDir, "speech_glossary.json")
+    @Volatile private var cachedGlossary: Map<String, String>? = null
 
     private val defaultGlossary = linkedMapOf(
         "Euler" to "Oiler",
@@ -25,6 +26,7 @@ class MathSpeechNormalizer(context: Context) {
     )
 
     fun getGlossary(): Map<String, String> {
+        cachedGlossary?.let { return it }
         val merged = LinkedHashMap(defaultGlossary)
         if (glossaryFile.exists()) {
             runCatching {
@@ -36,6 +38,7 @@ class MathSpeechNormalizer(context: Context) {
                 }
             }
         }
+        cachedGlossary = merged
         return merged
     }
 
@@ -49,6 +52,7 @@ class MathSpeechNormalizer(context: Context) {
         val obj = JSONObject()
         cur.forEach { (k, v) -> obj.put(k, v) }
         runCatching { glossaryFile.writeText(obj.toString(2), Charsets.UTF_8) }
+        cachedGlossary = cur
     }
 
     fun normalize(raw: String): String {

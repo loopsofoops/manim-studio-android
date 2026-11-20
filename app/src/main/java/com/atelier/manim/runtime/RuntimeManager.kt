@@ -208,7 +208,7 @@ class RuntimeManager(private val context: Context) {
     fun deployAtelierSdk() {
         runCatching {
             val pkgDir = File(sdkDir, "atelier").apply { mkdirs() }
-            for (fname in listOf("__init__.py", "music_engine.py", "timeline_engine.py")) {
+            for (fname in listOf("__init__.py", "music_engine.py", "timeline_engine.py", "studio_engines.py")) {
                 context.assets.open("atelier_sdk/atelier/$fname").use { input ->
                     File(pkgDir, fname).writeBytes(input.readBytes())
                 }
